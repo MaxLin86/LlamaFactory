@@ -1,0 +1,217 @@
+{
+    "gs_det_11cls": {
+        "save_name": "dataset_1_gs_det_11cls",
+        "src_path": ["/media/maxlin/ECDatasets2/EC05-02/DET04/DataImages/DET04-Train-D1",
+                     "/media/maxlin/ECDatasets2/EC05-02/DET04/DataImages/DET04-Test-D1"],
+        "description": "上消化道病变检测数据集，11分类，GI-DET04-Train-D1，GI-DET04-Test-D1比D2更实际",
+        "sub_folder": ["train", "val", "test"],
+        "format": "COCO",
+        "level": "crop",
+        "info": {
+            "label": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"],
+            "cls": ["食管癌", "食管黏膜下肿瘤", "食管静脉曲张", "霉菌性食管炎", "反流性食管炎", "巴雷特食管炎", "胃食管黏膜异位", "胃癌", "胃溃疡", "胃息肉", "胃黏膜下隆起"],
+            "target": "float_norm_from_bbox",
+            "location": "location_L2",
+            "status": "model_run"}
+    },
+    "gs_qc_27cls": {
+        "save_name": "dataset_2_gs_qc_27cls",
+        "src_path": "/media/maxlin/ECDatasets2/EC05-01/B_gqc/DataImages",
+        "description": "上消化道质控数据集，24+3分类，GI-QC03-Train-D3，GI-QC03-Test-D5",
+        "sub_folder": ["train", "val", "test"],
+        "format": "COCO",
+        "level": "crop",
+        "info": {
+            "label": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26"],
+            "cls": ["正镜-食管", "正镜-胃食管结合部", "正镜-胃体中上部前壁", "正镜-胃体中上部后壁", "正镜-胃体中上部大弯", 
+                "正镜-胃体下部前壁", "正镜-胃体下部后壁", "正镜-胃体下部大弯", "正镜-十二指肠球部", "正镜-十二指肠降部", 
+                "倒镜-胃体下部小弯", "倒镜-胃体上中部小弯", "倒镜-胃底", "倒镜-贲门大弯", "倒镜-贲门小弯", "倒镜-贲门前壁", 
+                "倒镜-贲门后壁", "正镜-胃窦大弯", "正镜-胃窦小弯", "正镜-胃窦前壁", "正镜-胃窦后壁", "倒镜-胃角小弯", 
+                "倒镜-胃角前角", "倒镜-胃角后角", "口部", "咽部", "无效"],
+            "location": "cls",
+            "status": "model_run"}
+    },
+    "gs_qc_37cls": {
+        "save_name": "dataset_3_gs_qc_37cls",
+        "src_path": "/media/maxlin/SATA/gastroscope-qc/v3/Dataset_50_100",
+        "description": "上消化道质控数据集，36+1分类，无数据集记录",
+        "sub_folder": ["train", "test"],
+        "format": "folder",
+        "level": "crop",
+        "info": {
+            "label": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26",
+                    "27", "28", "29", "30", "31", "32", "33", "34", "35", "40"],
+            "cls": ["口部", "咽部", "食管入口", "食管中段", "食管下段", "胃食管结合部", "十二指肠降部", "十二指肠球部", 
+                "幽门", "胃窦", "胃窦大弯", "胃窦前壁", "胃窦小弯", "胃窦后壁", "胃角", "胃角前壁", "胃角后壁", 
+                "倒镜-胃体下部小弯", "倒镜-胃体中部小弯", "倒镜-贲门小弯", "倒镜-贲门大弯", "倒镜-贲门前壁", "倒镜-贲门后壁", 
+                "倒镜-胃底", "正镜-胃体下部大弯", "正镜-胃体下部前壁", "正镜-胃体下部小弯", "正镜-胃体下部后壁", "正镜-胃体中部大弯", 
+                "正镜-胃体中部前壁", "正镜-胃体中部小弯", "正镜-胃体中部后壁", "正镜-胃体上部大弯", "正镜-胃体上部前壁", "正镜-胃体上部小弯", 
+                "正镜-胃体上部后壁", "无效"],
+            "location": "cls",
+            "status": "model_run"},
+        "spec_fun": "map_to_7plus1"
+    },
+    "gs_exp_atropyh_1cls": {
+        "save_name": "dataset_4_gs_exp_atropyh_1cls",
+        "src_path": "/media/maxlin/ECDatasets2/KEY-EXP/Atrophy/COCO_FORMAT_ATROPHY_V1_231219",
+        "description": "上消化道萎缩检测数据集，仅1个阳性类，阳性框以box为单位",
+        "sub_folder": ["train", "val"],
+        "format": "COCO",
+        "level": "crop",
+        "info": {
+            "label": ["1"],
+            "cls": ["胃萎缩黏膜"],
+            "target": "float_norm_from_bbox",
+            "location": "model_run",
+            "status": "model_run"}
+    },
+    "gs_exp_refluxLA_4cls": {
+        "save_name": "dataset_5_gs_exp_refluxLA_4cls",
+        "src_path": "/media/maxlin/ECDatasets2/KEY-EXP/Reflux_LA/coco_format_reflux_v3",
+        "description": "上消化道反流性食管炎LA分级数据集，4分类",
+        "sub_folder": ["train", "test"],
+        "format": "folder",
+        "level": "crop",
+        "info": {
+            "label": ["0", "1", "2", "3"],
+            "cls": ["LA-A级", "LA-B级", "LA-C级", "LA-D级"],
+            "location": "胃食管结合部",
+            "status": "model_run"}
+    },
+    "gs_exp_ulcerAHS_6cls": {
+        "save_name": "dataset_6_gs_exp_ulcerAHS_6cls",
+        "src_path": "/media/maxlin/ECDatasets2/KEY-EXP/Ulcer_AHS/COCO_FORMAT_AHS_v2/images_cls/all",
+        "description": "上消化道溃疡AHS分期数据集，6分类",
+        "sub_folder": ["train", "val"],
+        "format": "folder",
+        "level": "lesion",
+        "info": {
+            "label": ["1", "2", "3", "4", "5", "6"],
+            "cls": ["AHS-A1期", "AHS-A2期", "AHS-H1期", "AHS-H2期", "AHS-S1期", "AHS-S2期"],
+            "location": "无法识别"}
+    },
+    "gs_exp_ulcerForrest_6cls": {
+        "save_name": "dataset_7_gs_exp_ulcerForrest_6cls",
+        "src_path": "/media/maxlin/ECDatasets2/KEY-EXP/Ulcer_Forrest/COCO_FORMAT_FORREST_v2/images_cls/all",
+        "description": "上消化道溃疡Forrest分级数据集，6分类",
+        "sub_folder": ["train", "val"],
+        "format": "folder",
+        "level": "lesion",
+        "info": {
+            "label": ["1", "2", "3", "4", "5", "6"],
+            "cls": ["Forrest-Ia级", "Forrest-Ib级", "Forrest-IIa级", "Forrest-IIb级", "Forrest-III级", "Forrest-IIc级"],
+            "location": "无法识别"}
+    },
+    "gs_exp_IPCL_5cls": {
+        "save_name": "dataset_8_gs_exp_IPCL_5cls",
+        "src_path": "/media/maxlin/ECDatasets2/KEY-EXP/IPCL/VOC_FORMAT_IPCL_v4_7",
+        "description": "上消化道食管IPCL分型数据集，5分类，VOC格式下默认三级文件夹分别为color/mask/JPEGImages",
+        "sub_folder": ["train", "val"],
+        "format": "VOC",
+        "level": "crop",
+        "info": {
+            "label": ["0", "1", "2", "3", "4"],
+            "cls": ["背景类", "IPCL-a型", "IPCL-b1型", "IPCL-b2型", "IPCL-b3型"],
+            "target": "float_norm_from_mask",
+            "location": "食管",
+            "status": "model_run"}
+    },
+    "cs_det_1cls": {
+        "save_name": "dataset_9_cs_det_1cls",
+        "src_path": ["/media/maxlin/ECDatasets2/GI-DET01/GI-DET01-Train-D4",
+                     "/media/maxlin/ECDatasets2/GI-DET01/GI-DET01-Test-D8",
+                     "/media/maxlin/ECDatasets2/GI-DET01/GI-DET01-Test-D9"],
+        "description": "下消化道息肉检测数据集，仅1个阳性类，阳性框以box为单位",
+        "sub_folder": ["train", "val", "test"],
+        "format": "COCO",
+        "level": "crop",
+        "info": {
+            "label": ["1"],
+            "cls": ["息肉"],
+            "target": "float_norm_from_bbox",
+            "location": "model_run",
+            "status": "model_run"}
+    },
+    "cs_qc_5cls": {
+        "save_name": "dataset_10_cs_qc_5cls",
+        "src_path": "/media/maxlin/ECDatasets/EC01-02/B_cqc/DataImages",
+        "description": "下消化道回盲部识别数据集，训练时5个类，测试时4个类，图像测试集D3比D5更实际",
+        "sub_folder": ["train", "val", "test"],
+        "format": "folder",
+        "level": "crop",
+        "info": {
+            "label": ["体外", "回盲部", "大肠", "小肠", "无效"],
+            "cls": ["体外", "回盲部", "大肠", "小肠", "无效"],
+            "location": "cls",
+            "status": "model_run"}
+    },
+    "cs_nice_3cls": {
+        "save_name": "dataset_11_cs_nice_3cls",
+        "src_path": ["/media/maxlin/ECDatasets2/GI-CLS01/CLS01-Train-D1-train",
+                    "/media/maxlin/ECDatasets2/GI-CLS01/CLS01-Train-D1-val",
+                    "/media/maxlin/ECDatasets2/GI-CLS01/CLS01-Test-D1",
+                    "/media/maxlin/ECDatasets2/GI-CLS01/CLS01-Test-D2"],
+        "description": "下消化道NICE分型数据集，标签以病变为单位",
+        "sub_folder": ["images_crop"],
+        "format": "INNO",
+        "level": "lesion",
+        "info": {
+            "label": ["0", "1", "2", "3"],
+            "cls": ["其他", "NICE-I型", "NICE-II型", "NICE-III型"],
+            "location": "肠道",
+            "status": ["lightsource", "quality", "lesion_morphology", "gt_pathology"]}
+    },
+    "cs_cadx_2cls": {
+        "save_name": "dataset_12_cs_cadx_2cls",
+        "src_path": ["/media/maxlin/ECDatasets2/GI-CLS03/CLS03-Train-D1/CLS03-Train-D1-train",
+                    "/media/maxlin/ECDatasets2/GI-CLS03/CLS03-Train-D1/CLS03-Train-D1-val",
+                    "/media/maxlin/ECDatasets2/GI-CLS03/CLS03-Test-D1/CLS03-Test-D1-image"],
+        "description": "下消化道CADX数据集，标签以病变为单位",
+        "sub_folder": ["train", "val", "test", "images"],
+        "format": "INNO",
+        "level": "lesion",
+        "info": {
+            "label": ["0", "1", "2"],
+            "cls": ["其他", "非肿瘤性病变", "肿瘤性病变"],
+            "location": "肠道",
+            "status": ["lightsource", "quality", "morphology", "pathology"]}
+    },
+    "cs_bc_3cls": {
+        "save_name": "dataset_13_cs_bc_3cls",
+        "src_path": "/media/maxlin/ECDatasets2/KEY-EXP/BC/COCO_FORMAT_BC_V12",
+        "description": "下消化道肠道清洁度检测数据集",
+        "sub_folder": ["train", "test"],
+        "format": "COCO",
+        "level": "crop",
+        "info": {
+            "label": ["1", "2", "3"],
+            "cls": ["气泡或反光", "粪渣粪块", "粪水"],
+            "target": "float_norm_from_bbox",
+            "location": "model_run",
+            "status": "model_run"}
+    },
+    "type_4cls": {
+        "save_name": "dataset_14_type_4cls",
+        "src_path": "/media/maxlin/ECDatasets2/EC05-01/C_type/DataImages",
+        "description": "检查类型数据集",
+        "sub_folder": ["train", "val"],
+        "format": "COCO",
+        "level": "ori",
+        "info": {
+            "label": ["0", "1", "2", "3"],
+            "cls": ["胃镜入口（口套）", "胃镜入口（咽部）", "肠镜入口（肛门）", "其他"],
+            "location": "cls"}
+    },
+    "status_23Mcls": {
+        "save_name": "dataset_15_status_23Mcls",
+        "src_path": ["/media/maxlin/ECDatasets2/GI-QC06/GI-QC06-Train-D1-train",
+                    "/media/maxlin/ECDatasets2/GI-QC06/GI-QC06-Train-D1-val",
+                    "/media/maxlin/ECDatasets2/GI-QC06/GI-QC06-Test-D1/DataImages"],
+        "description": "状态识别数据集",
+        "sub_folder": ["train", "val", "test", "images"],
+        "format": "COCO",
+        "level": "crop",
+        "info": {
+            "status": ["lightsource", "staining", "surgical_cap", "instrument", "magnification", "quality", "has_external"]}
+    }
+}
