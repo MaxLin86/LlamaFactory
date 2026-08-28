@@ -1,6 +1,6 @@
 ### model
 model_name_or_path: /media/maxlin/SATA/modelscope/Qwen3-VL-2B-Instruct
-adapter_name_or_path: saves/qwen3-vl-2b/inno_report_loraSTF_test2/checkpoint-500
+adapter_name_or_path: /home/maxlin/桌面/LlamaFactory/saves/qwen3-vl-2b/inno_report_loraSTF_max_v1_single_exp2_all_epoch1/checkpoint-105000
 image_max_pixels: 262144
 template: qwen3_vl_nothink
 infer_backend: huggingface

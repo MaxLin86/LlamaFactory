@@ -2,38 +2,42 @@
 # model_name_or_path: Qwen/Qwen3-VL-4B-Instruct
 model_name_or_path: /media/maxlin/SATA/modelscope/Qwen3-VL-2B-Instruct
 image_max_pixels: 262144 #512*512
-video_max_pixels: 16384
+image_min_pixels: 65536 #256*256
+# video_max_pixels: 65536 #256*256
 trust_remote_code: true
 
 ### method
 stage: sft
 do_train: true
 finetuning_type: lora
-lora_rank: 8 #任务越复杂越调大
-lora_target: all
+lora_rank: 16       # 任务越复杂越调大，欠拟合就提高
+lora_alpha: 32      # 通常2*rank
+lora_dropout: 0.05  # LORA支路训练时随机失活，降低过拟合，数据很干净且欠拟合可用0.0
+lora_target: all    # 具体挂到哪些线性层
+
+# 第一轮先建立语言侧基线。当前未显式配置时，LLaMA-Factory默认：
+freeze_vision_tower: true           # 为true时，配合loar=all，视觉塔被冻结，解除它通常比提高rank有意义
+freeze_multi_modal_projector: true
+# disable_gradient_checkpointing: true  # 用重复计算换显存，默认false，会变慢但省空间。实测大概快20%
 
 # ### dataset
-# dataset: mllm_demo,identity,alpaca_en_demo  # video: mllm_video_demo
-# template: qwen3_vl_nothink
-# cutoff_len: 2048
-# max_samples: 1000
-# preprocessing_num_workers: 16
-# dataloader_num_workers: 4
-dataset: inno_report_for_single_image
+dataset: max_v1_single
+dataset_dir: /media/maxlin/SATA/ReportData/Max_V1_single
 template: qwen3_vl_nothink
 cutoff_len: 2048
-preprocessing_num_workers: 4
-dataloader_num_workers: 2
-val_size: 0.1
-per_device_eval_batch_size: 4 #1
-eval_strategy: steps
-eval_steps: 100 #50
-# eval_strategy: epoch
+preprocessing_num_workers: 2    #提高并不一定更快，有可能出现资源竞争。每个workder会分到一个arrow文件
+preprocessing_batch_size: 2000   #默认1000
+dataloader_num_workers: 4
+dataloader_persistent_workers: true
+tokenized_path: /media/maxlin/SATA/ReportData/tokenized/max_v1_qwen3vl2b_min256_max512_cut2048_val20k
+overwrite_cache: false  # false则使用已缓存的预处理数据，true则重新处理数据
+# max_samples: 5000       # 小批量调试开启，否则关闭
 
 ### output
-output_dir: saves/qwen3-vl-2b/inno_report_loraSTF_test2
-logging_steps: 10
-save_steps: 100 #500
+output_dir: saves/qwen3-vl-2b/inno_report_loraSTF_max_v1_single_exp3_all_epoch1
+logging_steps: 100
+save_steps: 5000         # 小批量调试开启 100/5000
+save_total_limit: 5     # 旧checkpoint会被自动清理
 # save_strategy: epoch
 plot_loss: true
 overwrite_output_dir: true
@@ -41,19 +45,27 @@ save_only_model: false
 report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
 
 ### train
-per_device_train_batch_size: 4 #1
-gradient_accumulation_steps: 2 #8
+per_device_train_batch_size: 4 
+gradient_accumulation_steps: 2
 learning_rate: 1.0e-4
-num_train_epochs: 100 #3.0
+num_train_epochs: 1.0
 lr_scheduler_type: cosine
-warmup_ratio: 0.1
+# warmup_ratio: 0.1
+warmup_steps: 1000
+
+load_best_model_at_end: false
+metric_for_best_model: eval_loss
+greater_is_better: false
+
 bf16: true
 ddp_timeout: 180000000
 resume_from_checkpoint: null
 flash_attn: fa2
 
-### eval
-# val_size: 0.1
-# per_device_eval_batch_size: 1
-# eval_strategy: steps
-# eval_steps: 500
+
+#val_size: 0.1
+val_size: 20000           # 小批量调试开启 500/20000
+per_device_eval_batch_size: 4
+eval_strategy: steps
+eval_steps: 5000         # 小批量调试开启 100/5000
+# eval_strategy: epoch

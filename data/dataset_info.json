@@ -2,12 +2,12 @@
   "identity": {
     "file_name": "identity.json"
   },
-  "inno_report_for_single_image": {
-    "file_name": "/media/maxlin/SATA/ReportData/hfh-report/D2_病变描述/all.json",
+  "inno_report_max_v1_single": {
+    "file_name": "all_conversations.json",
     "formatting": "sharegpt",
     "columns": {
       "messages": "conversations",
-      "images": "image"
+      "images": "images"
     }
   },
   "alpaca_en_demo": {
