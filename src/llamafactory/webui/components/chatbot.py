@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from ...data import Role
 from ...extras.packages import is_gradio_available
+from ..bbox_plotter import plot_latest_response_boxes
 from ..locales import ALERTS
 
 
@@ -72,11 +73,19 @@ def create_chat_box(
                         with gr.Tab("Image"):
                             image = gr.Image(type="pil")
 
+                        with gr.Tab("BBox"):
+                            bbox_image = gr.Image(type="pil", interactive=False)
+                            bbox_info = gr.Textbox(interactive=False, lines=4)
+
                         with gr.Tab("Video"):
                             video = gr.Video()
 
                         with gr.Tab("Audio"):
                             audio = gr.Audio(type="filepath")
+
+                        with gr.Row():
+                            bbox_plot_btn = gr.Button()
+                            bbox_clear_btn = gr.Button()
 
                 query = gr.Textbox(show_label=False, lines=8)
                 submit_btn = gr.Button(variant="primary")
@@ -118,7 +127,14 @@ def create_chat_box(
         ],
         [chatbot, messages],
     )
-    clear_btn.click(lambda: ([], []), outputs=[chatbot, messages])
+    bbox_plot_btn.click(
+        plot_latest_response_boxes,
+        inputs=[image, messages, lang],
+        outputs=[bbox_image, bbox_info],
+    )
+    bbox_clear_btn.click(lambda: (None, ""), outputs=[bbox_image, bbox_info], queue=False)
+    image.change(lambda: (None, ""), outputs=[bbox_image, bbox_info], queue=False)
+    clear_btn.click(lambda: ([], [], None, ""), outputs=[chatbot, messages, bbox_image, bbox_info])
 
     return (
         chatbot,
@@ -130,6 +146,10 @@ def create_chat_box(
             tools=tools,
             mm_box=mm_box,
             image=image,
+            bbox_image=bbox_image,
+            bbox_info=bbox_info,
+            bbox_plot_btn=bbox_plot_btn,
+            bbox_clear_btn=bbox_clear_btn,
             video=video,
             audio=audio,
             query=query,

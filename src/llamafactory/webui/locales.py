@@ -2611,6 +2611,34 @@ LOCALES = {
             "label": "画像（オプション）",
         },
     },
+    "bbox_image": {
+        "en": {"label": "Detection result"},
+        "ru": {"label": "Результат обнаружения"},
+        "zh": {"label": "检测结果"},
+        "ko": {"label": "검출 결과"},
+        "ja": {"label": "検出結果"},
+    },
+    "bbox_info": {
+        "en": {"label": "Bounding-box details"},
+        "ru": {"label": "Сведения о боксах"},
+        "zh": {"label": "目标框信息"},
+        "ko": {"label": "경계 상자 정보"},
+        "ja": {"label": "バウンディングボックス情報"},
+    },
+    "bbox_plot_btn": {
+        "en": {"value": "Draw boxes"},
+        "ru": {"value": "Нарисовать боксы"},
+        "zh": {"value": "绘制检测框"},
+        "ko": {"value": "상자 그리기"},
+        "ja": {"value": "ボックスを描画"},
+    },
+    "bbox_clear_btn": {
+        "en": {"value": "Clear boxes"},
+        "ru": {"value": "Очистить боксы"},
+        "zh": {"value": "清除检测框"},
+        "ko": {"value": "상자 지우기"},
+        "ja": {"value": "ボックスを消去"},
+    },
     "video": {
         "en": {
             "label": "Video (optional)",
