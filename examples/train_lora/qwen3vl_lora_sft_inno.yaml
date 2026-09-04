@@ -2,7 +2,7 @@
 # model_name_or_path: Qwen/Qwen3-VL-4B-Instruct
 model_name_or_path: /media/maxlin/SATA/modelscope/Qwen3-VL-2B-Instruct
 image_max_pixels: 262144 #512*512
-image_min_pixels: 65536 #256*256
+image_min_pixels: 16384 #128*128
 # video_max_pixels: 65536 #256*256
 trust_remote_code: true
 
@@ -16,7 +16,7 @@ lora_dropout: 0.05  # LORA支路训练时随机失活，降低过拟合，数据
 lora_target: all    # 具体挂到哪些线性层
 
 # 第一轮先建立语言侧基线。当前未显式配置时，LLaMA-Factory默认：
-freeze_vision_tower: true           # 为true时，配合loar=all，视觉塔被冻结，解除它通常比提高rank有意义
+freeze_vision_tower: false           # 为true时，配合loar=all，视觉塔被冻结，解除它通常比提高rank有意义
 freeze_multi_modal_projector: true
 # disable_gradient_checkpointing: true  # 用重复计算换显存，默认false，会变慢但省空间。实测大概快20%
 
@@ -29,15 +29,15 @@ preprocessing_num_workers: 2    #提高并不一定更快，有可能出现资�
 preprocessing_batch_size: 2000   #默认1000
 dataloader_num_workers: 4
 dataloader_persistent_workers: true
-tokenized_path: /media/maxlin/SATA/ReportData/tokenized/max_v1_qwen3vl2b_min256_max512_cut2048_val20k
+tokenized_path: /media/maxlin/SATA/ReportData/tokenized/max_v1_qwen3vl2b_min128_max512_cut2048_val20k
 overwrite_cache: false  # false则使用已缓存的预处理数据，true则重新处理数据
 # max_samples: 5000       # 小批量调试开启，否则关闭
 
 ### output
-output_dir: saves/qwen3-vl-2b/inno_report_loraSTF_max_v1_single_exp3_all_epoch1
+output_dir: saves/qwen3-vl-2b/inno_report_loraSTF_max_v1_single_exp4_all_epoch1_openVIT_bs2
 logging_steps: 100
-save_steps: 5000         # 小批量调试开启 100/5000
-save_total_limit: 5     # 旧checkpoint会被自动清理
+save_steps: 10000         # 小批量调试开启 100/5000
+save_total_limit: 3     # 旧checkpoint会被自动清理
 # save_strategy: epoch
 plot_loss: true
 overwrite_output_dir: true
@@ -45,8 +45,8 @@ save_only_model: false
 report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
 
 ### train
-per_device_train_batch_size: 4 
-gradient_accumulation_steps: 2
+per_device_train_batch_size: 2  
+gradient_accumulation_steps: 4
 learning_rate: 1.0e-4
 num_train_epochs: 1.0
 lr_scheduler_type: cosine
@@ -67,5 +67,5 @@ flash_attn: fa2
 val_size: 20000           # 小批量调试开启 500/20000
 per_device_eval_batch_size: 4
 eval_strategy: steps
-eval_steps: 5000         # 小批量调试开启 100/5000
+eval_steps: 10000         # 小批量调试开启 100/5000
 # eval_strategy: epoch
