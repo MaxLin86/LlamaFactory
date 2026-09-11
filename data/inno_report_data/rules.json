@@ -152,29 +152,42 @@
                     "/media/maxlin/ECDatasets2/GI-CLS01/CLS01-Test-D1",
                     "/media/maxlin/ECDatasets2/GI-CLS01/CLS01-Test-D2"],
         "description": "下消化道NICE分型数据集，标签以病变为单位",
-        "sub_folder": ["images_crop"],
+        "sub_folder": ["images"],
         "format": "INNO",
-        "level": "lesion",
+        "level": "ori",
+        "merge_original_lesions": true,
+        "require_original_image": true,
+        "per_lesion_cadx": true,
         "info": {
             "label": ["0", "1", "2", "3"],
             "cls": ["其他", "NICE-I型", "NICE-II型", "NICE-III型"],
+            "target": "float_norm_from_bbox",
             "location": "肠道",
-            "status": ["lightsource", "quality", "lesion_morphology", "gt_pathology"]}
+            "status": ["lightsource", "quality", "lesion_morphology"]}
     },
     "cs_cadx_2cls": {
         "save_name": "dataset_12_cs_cadx_2cls",
         "src_path": ["/media/maxlin/ECDatasets2/GI-CLS03/CLS03-Train-D1/CLS03-Train-D1-train",
                     "/media/maxlin/ECDatasets2/GI-CLS03/CLS03-Train-D1/CLS03-Train-D1-val",
                     "/media/maxlin/ECDatasets2/GI-CLS03/CLS03-Test-D1/CLS03-Test-D1-image"],
+        "original_src_path": ["/media/maxlin/ECDatasets2/GI-DET01/GI-DET01-Train-D4",
+                              "/media/maxlin/ECDatasets2/GI-DET01/GI-DET01-Test-D8",
+                              "/media/maxlin/ECDatasets2/GI-DET01/GI-DET01-Test-D9",
+                              "/media/maxlin/SATA/INNO-CLS01-nice/img",
+                              "/media/maxlin/SATA/INNO-CLS01-fzbjy/img"],
         "description": "下消化道CADX数据集，标签以病变为单位",
-        "sub_folder": ["train", "val", "test", "images"],
+        "sub_folder": ["train", "val", "test", "image_ori"],
         "format": "INNO",
-        "level": "lesion",
+        "level": "ori",
+        "merge_original_lesions": true,
+        "require_original_image": true,
+        "per_lesion_cadx": true,
         "info": {
             "label": ["0", "1", "2"],
             "cls": ["其他", "非肿瘤性病变", "肿瘤性病变"],
+            "target": "float_norm_from_bbox",
             "location": "肠道",
-            "status": ["lightsource", "quality", "morphology", "pathology"]}
+            "status": ["lightsource", "quality", "morphology"]}
     },
     "cs_bc_3cls": {
         "save_name": "dataset_13_cs_bc_3cls",

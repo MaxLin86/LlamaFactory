@@ -23,6 +23,17 @@ The implementation deliberately separates *format parsers* from *dataset
 hooks*.  COCO/VOC/folder/INNO layout differences are discovered by inspecting
 directory and JSON content.  Dataset-specific vocabulary conversion can be
 registered in ``SPEC_FUNCS`` without duplicating a complete parser.
+
+Run modes::
+
+    # Rebuild everything and replace the output directory.
+    python data/inno_report_data/data_generate_single_images.py --run-mode full
+
+    # Add only datasets absent from an existing completed output.
+    python data/inno_report_data/data_generate_single_images.py --run-mode add --datasets cs_qc_5cls
+
+    # Rebuild conversations from cache without touching images.
+    python data/inno_report_data/data_generate_single_images.py --run-mode adjust
 """
 
 from __future__ import annotations
@@ -488,9 +499,9 @@ import traceback
 
 import cv2
 import numpy as np
-import pycuda.autoinit
-import pycuda.driver as cuda
-import tensorrt as trt
+
+cuda = None
+trt = None
 
 
 MODEL_SPECS = json.loads(os.environ.pop("INNO_TRT_MODEL_SPECS"))
@@ -616,6 +627,7 @@ class Worker(object):
         self.models = {}
 
     def load_model(self, config_key):
+        global cuda, trt
         if config_key in self.models:
             return self.models[config_key]
         if config_key not in MODEL_SPECS:
@@ -623,6 +635,13 @@ class Worker(object):
         config = MODEL_SPECS[config_key]
         if not os.path.isfile(config["model"]):
             raise IOError("Local model asset not found: {}".format(config["model"]))
+        # Cropping is CPU-only. Import CUDA/TensorRT only for model inference.
+        if cuda is None or trt is None:
+            import pycuda.autoinit
+            import pycuda.driver as cuda_module
+            import tensorrt as trt_module
+            cuda = cuda_module
+            trt = trt_module
         print("Loading local TensorRT model {} from {}".format(config_key, config["model"]), file=sys.stderr)
         result = {
             "model": TensorRTInferCompat(config["model"], self.gpu_index),
@@ -868,6 +887,7 @@ def crop_original_image(
     roi = get_inno_runtime().crop_invalid_region(record.source_path, destination)
     metadata = dict(record.metadata)
     metadata["crop_roi_xywh"] = list(roi) if roi is not None else None
+    metadata["_prepared_level"] = "ori"
     return [PreparedImage(destination, transform_boxes_after_crop(record.boxes, roi), metadata)]
 
 
@@ -1083,16 +1103,44 @@ def compact_json(value: Any) -> str:
 class PreparedSampleCacheWriter:
     """Persist final-image annotations and model outputs for dialogue-only rebuilds."""
 
-    def __init__(self, path: Path, output_root: Path, config_path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        output_root: Path,
+        config_path: Path,
+        *,
+        append: bool = False,
+    ) -> None:
         self.path = path
         self.output_root = output_root.resolve(strict=False)
         self.config_path = config_path.resolve(strict=False)
+        self.append = append
         self.connection: sqlite3.Connection | None = None
         self.count = 0
 
     def __enter__(self) -> "PreparedSampleCacheWriter":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(str(self.path))
+        if self.append:
+            schema_version = self.connection.execute(
+                "SELECT value FROM cache_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            complete = self.connection.execute(
+                "SELECT value FROM cache_meta WHERE key = 'complete'"
+            ).fetchone()
+            if schema_version is None or str(schema_version[0]) != CACHE_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Unsupported prepared cache schema in {self.path}; "
+                    f"expected {CACHE_SCHEMA_VERSION!r}."
+                )
+            if complete is None or str(complete[0]) != "1":
+                raise RuntimeError("Add mode requires a completed prepared sample cache.")
+            row = self.connection.execute(
+                "SELECT COALESCE(MAX(sample_order), 0) FROM samples"
+            ).fetchone()
+            self.count = int(row[0])
+            self._set_meta("complete", "0")
+            return self
         self.connection.executescript(
             """
             CREATE TABLE cache_meta (
@@ -1154,6 +1202,14 @@ class PreparedSampleCacheWriter:
                 "xyxy": list(box.xyxy),
                 "label_id": box.label_id,
                 "label": box.label,
+                # Only lesion-level fields are needed when conversations are
+                # rebuilt.  COCO ``raw`` annotations may contain very large
+                # segmentation arrays and must not bloat the SQLite cache.
+                "raw": {
+                    key: box.raw[key]
+                    for key in ("lesion_morphology", "morphology", "gt_pathology", "pathology")
+                    if key in box.raw and is_useful(box.raw[key])
+                },
             }
             for box in prepared.boxes
         ]
@@ -1181,7 +1237,7 @@ class PreparedSampleCacheWriter:
                 compact_json(resolved_info),
             ),
         )
-        if self.count % CACHE_COMMIT_INTERVAL == 0:
+        if not self.append and self.count % CACHE_COMMIT_INTERVAL == 0:
             self.connection.commit()
 
     def mark_complete(self, conversation_count: int) -> None:
@@ -1194,8 +1250,13 @@ class PreparedSampleCacheWriter:
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         if self.connection is not None:
             if exc_type is not None:
-                self._set_meta("complete", "0")
-            self.connection.commit()
+                if self.append:
+                    self.connection.rollback()
+                else:
+                    self._set_meta("complete", "0")
+                    self.connection.commit()
+            else:
+                self.connection.commit()
             self.connection.close()
             self.connection = None
 
@@ -1242,6 +1303,21 @@ class PreparedSampleCacheReader:
         row = self.connection.execute("SELECT COUNT(*) FROM samples").fetchone()
         return int(row[0])
 
+    def first_metadata(self, dataset_key: str) -> dict[str, Any] | None:
+        if self.connection is None:
+            raise RuntimeError("Prepared sample cache is not open.")
+        row = self.connection.execute(
+            "SELECT metadata_json FROM samples WHERE dataset_key = ? LIMIT 1",
+            (dataset_key,),
+        ).fetchone()
+        return None if row is None else json.loads(row[0])
+
+    def dataset_keys(self) -> set[str]:
+        if self.connection is None:
+            raise RuntimeError("Prepared sample cache is not open.")
+        rows = self.connection.execute("SELECT DISTINCT dataset_key FROM samples")
+        return {str(row[0]) for row in rows}
+
     def samples(self) -> Iterator[tuple[ImageRecord, PreparedImage, dict[str, Any]]]:
         if self.connection is None:
             raise RuntimeError("Prepared sample cache is not open.")
@@ -1260,6 +1336,7 @@ class PreparedSampleCacheReader:
                     tuple(float(value) for value in item["xyxy"]),
                     item.get("label_id"),
                     item.get("label"),
+                    item.get("raw") or {},
                 )
                 for item in json.loads(row["boxes_json"])
             ]
@@ -1399,6 +1476,41 @@ class ImageResolver:
     def __init__(self) -> None:
         self._indexes: dict[Path, dict[str, list[Path]]] = {}
         self._layout_cache: dict[tuple[tuple[str, ...], str], Path] = {}
+        self._directory_entries: dict[Path, set[str] | None] = {}
+
+    def _direct_file(
+        self,
+        directory: Path,
+        relative: Path,
+        indexed: bool,
+        allow_alternate_suffix: bool,
+    ) -> Path | None:
+        """Resolve a direct child, optionally indexing a large directory once."""
+
+        if not indexed or relative.parent != Path("."):
+            candidate = directory / relative
+            return candidate if candidate.is_file() else None
+        directory = directory.resolve(strict=False)
+        if directory not in self._directory_entries:
+            try:
+                self._directory_entries[directory] = {
+                    entry.name
+                    for entry in os.scandir(directory)
+                    if entry.is_file(follow_symlinks=False)
+                }
+            except (OSError, PermissionError):
+                self._directory_entries[directory] = None
+        entries = self._directory_entries[directory]
+        if entries is None:
+            return None
+        if relative.name in entries:
+            return directory / relative
+        if allow_alternate_suffix:
+            for suffix in sorted(IMAGE_SUFFIXES):
+                alternate = relative.with_suffix(suffix)
+                if alternate.name in entries:
+                    return directory / alternate
+        return None
 
     def resolve(
         self,
@@ -1408,10 +1520,13 @@ class ImageResolver:
         explicit_paths: Sequence[Any] = (),
         layout_hints: Sequence[str] = (),
         preferred_subdirs: Sequence[str] = (),
+        cache_layout: bool = True,
+        allow_index_fallback: bool = True,
+        allow_alternate_suffix: bool = False,
     ) -> Path | None:
         relative = Path(file_name)
         layout_key = (tuple(os.path.abspath(root) for root in roots), split)
-        cached_base = self._layout_cache.get(layout_key)
+        cached_base = self._layout_cache.get(layout_key) if cache_layout else None
         if cached_base is not None:
             # COCO images belonging to one annotation split share a layout.
             # Avoid an expensive network-filesystem stat for every image; the
@@ -1443,9 +1558,15 @@ class ImageResolver:
         direct_subdirs.extend(["images", "image", "JPEGImages", "images_crop"])
         for root in roots:
             for subdir in direct_subdirs:
-                candidate = root / subdir / relative
-                if candidate.is_file():
-                    self._layout_cache[layout_key] = root / subdir
+                candidate = self._direct_file(
+                    root / subdir,
+                    relative,
+                    indexed=not cache_layout,
+                    allow_alternate_suffix=allow_alternate_suffix,
+                )
+                if candidate is not None:
+                    if cache_layout:
+                        self._layout_cache[layout_key] = root / subdir
                     return candidate
 
         # Absolute paths embedded in metadata are a fallback.  Prefer the
@@ -1457,6 +1578,9 @@ class ImageResolver:
             candidate = Path(raw_path)
             if candidate.is_file():
                 return candidate
+
+        if not allow_index_fallback:
+            return None
 
         basename = relative.name
         candidates: list[Path] = []
@@ -1691,7 +1815,14 @@ def boxes_from_image_metadata(
             continue
         label_id = label_ids[min(index, len(label_ids) - 1)] if label_ids else None
         label = labels[min(index, len(labels) - 1)] if labels else label_id
-        result.append(Box((x1, y1, x2, y2), label_id, label, {"source": "image_metadata"}))
+        # Retain the annotation row on the box.  INNO classification JSON is
+        # lesion-oriented, so fields such as morphology belong to this exact
+        # lesion rather than to the full image.  Keeping it here lets repeated
+        # original images be merged without losing the box/label/attribute
+        # relationship.
+        raw = dict(image_info)
+        raw["source"] = "image_metadata"
+        result.append(Box((x1, y1, x2, y2), label_id, label, raw))
     return result
 
 
@@ -1716,6 +1847,13 @@ def parse_inno_dataset(
     records: list[ImageRecord] = []
     configured_splits = config.get("sub_folder", [])
     level = normalize_level(config.get("level", "lesion"))
+    raw_original_roots = config.get("original_src_path", [])
+    if isinstance(raw_original_roots, str):
+        raw_original_roots = [raw_original_roots]
+    original_roots = unique_paths(
+        Path(path) for path in raw_original_roots if Path(path).is_dir()
+    )
+    missing_originals: list[tuple[Path, str]] = []
     for root_index, root in enumerate(roots):
         json_files = discover_files(root, {".json"}, search_depth)
         # ``*_ori.json`` describes the original full-frame image.  Processed
@@ -1751,21 +1889,50 @@ def parse_inno_dataset(
             for image_info in images:
                 if not isinstance(image_info, dict):
                     continue
-                file_name = image_info.get("file_name") or Path(str(image_info.get("file_path", ""))).name
+                if level == "ori":
+                    file_name = (
+                        image_info.get("file_name_ori")
+                        or image_info.get("file_name_origin")
+                        or image_info.get("file_name")
+                        or Path(str(image_info.get("file_path", ""))).name
+                    )
+                else:
+                    file_name = image_info.get("file_name") or Path(str(image_info.get("file_path", ""))).name
                 if not file_name:
                     continue
                 preferred_subdirs = (
-                    ("images", "image") if level == "ori" else ("images_crop", "crop", "images")
+                    ("image_ori", "images_ori", "original", "originals", "images", "image")
+                    if level == "ori"
+                    else ("images_crop", "crop", "images")
                 )
                 image_path = resolver.resolve(
                     str(file_name),
-                    [root],
+                    unique_paths([root, *original_roots]),
                     split,
                     preferred_explicit_image_paths(image_info, level),
                     preferred_subdirs=preferred_subdirs,
+                    # Original-image sources can be spread across several
+                    # roots.  A layout cached from the first hit must not make
+                    # later missing files look valid.
+                    cache_layout=level != "ori",
+                    # A basename-only recursive fallback could accidentally
+                    # select a lesion crop.  Original-image matching is exact.
+                    allow_index_fallback=level != "ori",
+                    # Some INNO JSON rows retain a historical .jpg name while
+                    # the copied source is losslessly stored as .png.
+                    allow_alternate_suffix=level == "ori",
                 )
                 if image_path is None:
-                    LOGGER.warning("[%s] INNO image not found: %s", dataset_key, file_name)
+                    if level == "ori":
+                        if config.get("require_original_image"):
+                            raise FileNotFoundError(
+                                f"[{dataset_key}] Original image required by {annotation_path.name} "
+                                f"was not found: {file_name}. Add its directory to original_src_path; "
+                                "lesion crops will never be used as an implicit fallback."
+                            )
+                        missing_originals.append((annotation_path, str(file_name)))
+                    else:
+                        LOGGER.warning("[%s] INNO image not found: %s", dataset_key, file_name)
                     continue
                 raw_ids = to_string_list(first_present(image_info, "gt_cls", "class", "label"))
                 labels = [map_label(label_id, label_id, config) for label_id in raw_ids]
@@ -1784,7 +1951,21 @@ def parse_inno_dataset(
                         annotation_path=annotation_path,
                     )
                 )
-    return deduplicate_records(records)
+    records = deduplicate_records(records)
+    if config.get("merge_original_lesions"):
+        for record in records:
+            record.metadata["_merged_by_original"] = True
+            record.metadata["_merged_lesion_count"] = len(record.boxes)
+    if missing_originals:
+        examples = ", ".join(
+            f"{path.name}:{name}" for path, name in missing_originals[:5]
+        )
+        message = (
+            f"[{dataset_key}] {len(missing_originals)} lesion annotations could not resolve "
+            f"their original image. Examples: {examples}"
+        )
+        LOGGER.warning(message)
+    return records
 
 
 def parse_folder_dataset(
@@ -1983,7 +2164,12 @@ def deduplicate_records(records: Sequence[ImageRecord]) -> list[ImageRecord]:
         previous.label_ids = unique_preserve_order([*previous.label_ids, *record.label_ids])
         previous.labels = unique_preserve_order([*previous.labels, *record.labels])
         previous.boxes = deduplicate_boxes([*previous.boxes, *record.boxes])
-        previous.metadata.update({key: value for key, value in record.metadata.items() if is_useful(value)})
+        # Image-level metadata should occur once after lesion rows are merged.
+        # Keep the first useful value for determinism; lesion-level values are
+        # preserved independently in ``Box.raw`` above.
+        for metadata_key, value in record.metadata.items():
+            if metadata_key not in previous.metadata or not is_useful(previous.metadata[metadata_key]):
+                previous.metadata[metadata_key] = value
     return list(by_key.values())
 
 
@@ -2465,6 +2651,18 @@ def format_preview_status(status: Any) -> str | None:
             continue
         canonical_name = canonical_status_field_name(stage_name)
         display_name = STATUS_STAGE_DISPLAY_NAMES.get(canonical_name, canonical_name)
+        if isinstance(winner, dict) and isinstance(winner.get("per_target"), list):
+            target_values = []
+            for item in winner["per_target"]:
+                if not isinstance(item, dict) or not is_useful(item.get("value")):
+                    continue
+                target_values.append(
+                    f"目标{item.get('target_index')}："
+                    f"{format_annotation_status_value(canonical_name, item['value'])}"
+                )
+            if target_values:
+                items.append(f"{display_name}：" + "；".join(target_values))
+            continue
         items.append(f"{display_name}：{format_annotation_status_value(canonical_name, winner)}")
     return "状态:\n" + "\n".join(f"  {item}" for item in items) if items else None
 
@@ -2526,6 +2724,16 @@ def resolve_preview_info(
         result["status"] = resolve_info_field(
             "status", status_spec, record, prepared.path, config, stats
         )
+        if config.get("per_lesion_cadx") and isinstance(result["status"], dict):
+            for raw_name in status_spec if isinstance(status_spec, list) else []:
+                canonical_name = canonical_status_field_name(str(raw_name))
+                if canonical_name not in {"lesion_morphology", "gt_pathology"}:
+                    continue
+                values = per_target_annotation_values(prepared.boxes, canonical_name)
+                if values:
+                    result["status"][canonical_name] = {"per_target": values}
+                else:
+                    result["status"].pop(canonical_name, None)
     return result
 
 
@@ -2565,12 +2773,16 @@ def prepare_record_image(
     destination = image_dir / safe_output_name(record, record_index)
     level = normalize_level(config.get("level", "crop"))
     if dry_run:
-        return [PreparedImage(destination, list(record.boxes), dict(record.metadata))]
+        metadata = dict(record.metadata)
+        metadata["_prepared_level"] = level
+        return [PreparedImage(destination, list(record.boxes), metadata)]
     image_dir.mkdir(parents=True, exist_ok=True)
     if level == "ori":
         return crop_original_image(record, destination, config)
     shutil.copy2(record.source_path, destination)
-    return [PreparedImage(destination, list(record.boxes), dict(record.metadata))]
+    metadata = dict(record.metadata)
+    metadata["_prepared_level"] = level
+    return [PreparedImage(destination, list(record.boxes), metadata)]
 
 
 def image_size(path: Path, fallback: Path) -> tuple[int, int]:
@@ -2616,6 +2828,14 @@ def metadata_fields(record: ImageRecord, field_names: Sequence[Any]) -> dict[str
     for raw_name in field_names:
         name = str(raw_name)
         canonical_name = canonical_status_field_name(name)
+        if (
+            record.metadata.get("_merged_by_original")
+            and canonical_name in {"lesion_morphology", "gt_pathology"}
+        ):
+            values = per_target_annotation_values(record.boxes, canonical_name)
+            if values:
+                result[canonical_name] = {"per_target": values}
+            continue
         if other_class and canonical_name in {"lesion_morphology", "gt_pathology"}:
             continue
         value = record.metadata.get(name)
@@ -2631,6 +2851,38 @@ def metadata_fields(record: ImageRecord, field_names: Sequence[Any]) -> dict[str
         if is_useful(value):
             result[canonical_name] = value
     return result
+
+
+def per_target_annotation_values(
+    boxes: Sequence[Box],
+    field_name: str,
+) -> list[dict[str, Any]]:
+    """Return one lesion attribute per box while preserving target indices."""
+
+    canonical_name = canonical_status_field_name(field_name)
+    candidate_names = [canonical_name]
+    candidate_names.extend(
+        alias for alias, canonical in STATUS_FIELD_ALIASES.items() if canonical == canonical_name
+    )
+    values: list[dict[str, Any]] = []
+    for index, box in enumerate(boxes, start=1):
+        # Earlier dataset rules establish that the catch-all class has no
+        # morphology/pathology annotation worth supervising.
+        if str(box.label or "").strip() == "其他" and canonical_name in {
+            "lesion_morphology",
+            "gt_pathology",
+        }:
+            continue
+        value = first_present(box.raw, *candidate_names)
+        if not is_useful(value):
+            continue
+        values.append(
+            {
+                "target_index": index,
+                "value": normalize_annotation_status_value(canonical_name, value),
+            }
+        )
+    return values
 
 
 def resolve_info_field(
@@ -2779,6 +3031,54 @@ def box_display_label(box: Box, record: ImageRecord, index: int) -> str:
     return str(label or "目标")
 
 
+def per_target_answer(
+    values: Sequence[dict[str, Any]],
+    total_targets: int,
+) -> str:
+    """Render lesion values, omitting a redundant target number for one box."""
+
+    useful_values = [item for item in values if is_useful(item.get("value"))]
+    if total_targets == 1 and useful_values:
+        return f"{plain_answer(useful_values[0]['value'])}。"
+    return "\n".join(
+        f"{item['target_index']}. 目标{item['target_index']}：{plain_answer(item['value'])}。"
+        for item in useful_values
+    )
+
+
+def build_per_target_cadx_qa(
+    record: ImageRecord,
+    prepared: PreparedImage,
+    config: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Build one diagnosis line for every lesion on a merged full image."""
+
+    values: list[dict[str, Any]] = []
+    for index, box in enumerate(prepared.boxes, start=1):
+        label = box_display_label(box, record, index - 1)
+        # In the merged NICE/CADX datasets, the catch-all class denotes a
+        # detector false positive.  It belongs in CADE as "疑似假阳", not
+        # in a lesion diagnosis/grading answer.
+        if label.strip() == "其他":
+            continue
+        if not category_contains_chinese(label):
+            continue
+        values.append(
+            {
+                "target_index": index,
+                "value": cadx_answer_with_description(label, config),
+            }
+        )
+    if not values:
+        return None
+    question = (
+        "请进行CADX：鉴别图像中的病变，并给出诊断及相应分级。"
+        if len(prepared.boxes) == 1
+        else "请进行CADX：逐一鉴别图像中的目标，并给出诊断及相应分级。"
+    )
+    return question, per_target_answer(values, len(prepared.boxes))
+
+
 def is_bowel_cleanliness_dataset(dataset_key: str) -> bool:
     tokens = re.split(r"[^a-z0-9]+", dataset_key.casefold())
     return "bc" in tokens
@@ -2788,6 +3088,7 @@ def build_cade_qa(
     record: ImageRecord,
     prepared: PreparedImage,
     target_spec: Any,
+    config: dict[str, Any],
 ) -> tuple[str, str] | None:
     if target_spec is None:
         return None
@@ -2808,17 +3109,38 @@ def build_cade_qa(
 
     width, height = prepared_image_size(prepared, record.source_path)
     details: list[str] = []
+    per_lesion_cadx = bool(config.get("per_lesion_cadx"))
+    single_target = len(prepared.boxes) == 1
+    false_positive_flags: list[bool] = []
     for index, box in enumerate(prepared.boxes):
         coordinates = normalized_box(box, width, height)
-        label = box_display_label(box, record, index)
+        diagnosis_label = box_display_label(box, record, index)
+        is_false_positive = per_lesion_cadx and diagnosis_label.strip() == "其他"
+        false_positive_flags.append(is_false_positive)
+        if per_lesion_cadx:
+            if single_target:
+                label = "疑似假阳" if is_false_positive else "病变"
+            else:
+                label = f"目标{index + 1}"
+                if is_false_positive:
+                    label += "（疑似假阳）"
+        else:
+            label = diagnosis_label
+        detail_prefix = "" if single_target else f"{index + 1}. "
         details.append(
-            f"{index + 1}. {label}，大约在{approximate_box_position(coordinates)}，"
+            f"{detail_prefix}{label}，大约在{approximate_box_position(coordinates)}，"
             f"{json.dumps(coordinates, ensure_ascii=False)}"
         )
+    answer_lead = (
+        "未发现明确病变，但有疑似假阳区域。"
+        if per_lesion_cadx and all(false_positive_flags)
+        else "有。"
+    )
     answer = (
-        "有。\n"
+        answer_lead
+        + "\n"
         + "\n".join(details)
-        + "\n坐标格式：归一化xyxy [x_min, y_min, x_max, y_max]，范围0-1。"
+        + "\n坐标：归一化 xyxy [x_min, y_min, x_max, y_max]（0-1）。"
     )
     return question, answer
 
@@ -2832,6 +3154,8 @@ def build_conversations(
 ) -> list[dict[str, str]]:
     info = config.get("info", {})
     qas: list[tuple[str, str]] = []
+    lesion_qas: list[tuple[str, str]] = []
+    per_lesion_cadx = bool(config.get("per_lesion_cadx"))
 
     resolved_info = resolved_info or {}
 
@@ -2862,6 +3186,11 @@ def build_conversations(
         else resolve_info_field("status", status_spec, record, prepared.path, config, stats)
     )
     if isinstance(status_value, dict):
+        allowed_status_names: set[str] | None = None
+        if isinstance(status_spec, list):
+            allowed_status_names = {
+                canonical_status_field_name(str(name)) for name in status_spec
+            }
         ordered_status_names = [stage_name for stage_name, _, _ in STATUS_STAGE_SPECS]
         ordered_status_names.extend(
             name for name in status_value if name not in ordered_status_names
@@ -2871,9 +3200,29 @@ def build_conversations(
             if raw_name not in status_value or not is_useful(status_value[raw_name]):
                 continue
             canonical_name = canonical_status_field_name(raw_name)
+            if allowed_status_names is not None and canonical_name not in allowed_status_names:
+                continue
             if canonical_name in handled_names:
                 continue
             handled_names.add(canonical_name)
+            if (
+                per_lesion_cadx
+                and canonical_name in {"lesion_morphology", "gt_pathology"}
+            ):
+                target_values = per_target_annotation_values(prepared.boxes, canonical_name)
+                if target_values:
+                    if len(prepared.boxes) == 1:
+                        question = status_question(canonical_name)
+                    else:
+                        question = (
+                            "图像中各目标的形态学表现是什么？"
+                            if canonical_name == "lesion_morphology"
+                            else "图像中各目标的病理结论是什么？"
+                        )
+                    lesion_qas.append(
+                        (question, per_target_answer(target_values, len(prepared.boxes)))
+                    )
+                continue
             qas.append(
                 (status_question(canonical_name), status_answer(canonical_name, status_value[raw_name]))
             )
@@ -2881,6 +3230,20 @@ def build_conversations(
         qas.append(("该图像的状态是什么？", semantic_prediction_answer(status_value)))
 
     target_spec = info.get("target")
+    if per_lesion_cadx:
+        # CADE establishes target numbers and coordinates first.  Subsequent
+        # lesion-level morphology/CADX answers can then refer to target1,
+        # target2, ... without an arbitrary or ambiguous ordering.
+        cade_qa = build_cade_qa(record, prepared, target_spec, config)
+        if cade_qa is not None:
+            qas.append(cade_qa)
+        qas.extend(lesion_qas)
+        cadx_qa = build_per_target_cadx_qa(record, prepared, config)
+        if cadx_qa is not None:
+            qas.append(cadx_qa)
+    else:
+        qas.extend(lesion_qas)
+
     category = preview_category_value(record, config) if target_spec is None else None
     category_answer = plain_answer(category) if is_useful(category) else ""
     location_answer = semantic_prediction_answer(location_value) if is_useful(location_value) else ""
@@ -2893,9 +3256,10 @@ def build_conversations(
         question = "请进行CADX：鉴别图像中的病变，并给出诊断及相应分级。"
         qas.append((question, cadx_answer_with_description(category_answer, config)))
 
-    cade_qa = build_cade_qa(record, prepared, target_spec)
-    if cade_qa is not None:
-        qas.append(cade_qa)
+    if not per_lesion_cadx:
+        cade_qa = build_cade_qa(record, prepared, target_spec, config)
+        if cade_qa is not None:
+            qas.append(cade_qa)
 
     conversations: list[dict[str, str]] = []
     for question, answer in qas:
@@ -3019,19 +3383,21 @@ def validate_output_is_separate(output_root: Path, config: dict[str, Any]) -> No
 
     output = str(output_root.resolve(strict=False))
     for dataset in config.values():
-        raw_roots = dataset.get("src_path", [])
-        if isinstance(raw_roots, str):
-            raw_roots = [raw_roots]
-        for raw_root in raw_roots:
-            source = str(Path(raw_root).resolve(strict=False))
-            try:
-                common = os.path.commonpath([output, source])
-            except ValueError:
-                continue
-            if common in {output, source}:
-                raise ValueError(
-                    f"Output root and source dataset must not overlap: output={output}, source={source}"
-                )
+        for root_field in ("src_path", "original_src_path"):
+            raw_roots = dataset.get(root_field, [])
+            if isinstance(raw_roots, str):
+                raw_roots = [raw_roots]
+            for raw_root in raw_roots:
+                source = str(Path(raw_root).resolve(strict=False))
+                try:
+                    common = os.path.commonpath([output, source])
+                except ValueError:
+                    continue
+                if common in {output, source}:
+                    raise ValueError(
+                        "Output root and source dataset must not overlap: "
+                        f"output={output}, source={source}"
+                    )
 
 
 def select_dataset_keys(config: dict[str, Any], requested: Sequence[str] | None) -> list[str]:
@@ -3058,14 +3424,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--run-mode",
-        choices=("full", "adjust"),
+        choices=("full", "add", "adjust"),
         default="full",
-        help="full: prepare images/cache/dialogues; adjust: rebuild only dialogues from the completed cache.",
+        help=(
+            "full: replace all output; add: append new --datasets to an existing completed output; "
+            "adjust: rebuild only dialogues from the completed cache."
+        ),
     )
     parser.add_argument(
         "--datasets",
         nargs="+",
-        help="Dataset keys to build; accepts spaces or comma-separated values. Default: all.",
+        help=(
+            "Dataset keys to build; accepts spaces or comma-separated values. "
+            "Required by add mode; full mode defaults to all."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -3114,6 +3486,15 @@ def adjust_conversations(config: dict[str, Any], config_path: Path, output_root:
 
     with PreparedSampleCacheReader(cache_path, output_root) as cache_reader:
         stats.discovered = len(cache_reader)
+        for dataset_key, dataset_config in config.items():
+            if not dataset_config.get("merge_original_lesions"):
+                continue
+            cached = cache_reader.first_metadata(dataset_key)
+            if cached is not None and cached.get("_prepared_level") != "ori":
+                raise RuntimeError(
+                    f"Cached dataset {dataset_key!r} predates the merged-original-image pipeline. "
+                    "Run --run-mode full before using adjust."
+                )
         with JsonArrayWriter(aggregate_path) as aggregate_writer:
             with tqdm(
                 cache_reader.samples(),
@@ -3132,6 +3513,14 @@ def adjust_conversations(config: dict[str, Any], config_path: Path, output_root:
                     if dataset_config is None:
                         raise KeyError(
                             f"Cached dataset {record.dataset_key!r} is absent from current rules.json."
+                        )
+                    if (
+                        dataset_config.get("merge_original_lesions")
+                        and prepared.metadata.get("_prepared_level") != "ori"
+                    ):
+                        raise RuntimeError(
+                            f"Cached dataset {record.dataset_key!r} was not prepared with the current "
+                            "merged-original-image pipeline. Run --run-mode full before using adjust."
                         )
                     sample = make_vlm_sample(
                         record,
@@ -3178,30 +3567,71 @@ def main() -> int:
     validate_config(config)
     if args.run_mode == "adjust":
         return adjust_conversations(config, args.config, args.output_root)
+    if args.run_mode == "add" and not args.datasets:
+        raise ValueError("Add mode requires --datasets; implicit addition of every dataset is disabled.")
 
     _SKIP_MODEL_INFERENCE = args.dry_run
     validate_output_is_separate(args.output_root, config)
-    output_existed = args.output_root.exists()
-    if not confirm_and_reset_output_root(args.output_root):
-        print("已取消生成，现有输出文件夹未作任何修改。")
-        return 0
-    log_path = configure_logging(args.log_level, args.output_root)
-    LOGGER.info("Generation run started; log file: %s", log_path)
-    if output_existed:
-        LOGGER.info("Previous output directory was fully removed before this run.")
-    LOGGER.info("Config: %s; output root: %s", args.config.resolve(), args.output_root.resolve())
-    configure_inno_runtime(args.gpu_index, args.trt_python)
     dataset_keys = select_dataset_keys(config, args.datasets)
     resolver = ImageResolver()
+    add_mode = args.run_mode == "add"
+    existing_conversation_samples = 0
+    if add_mode:
+        if not args.output_root.is_dir():
+            raise FileNotFoundError(
+                f"Add mode requires an existing full-run output directory: {args.output_root}"
+            )
+        cache_path = args.output_root / CACHE_FILE_NAME
+        aggregate_path = args.output_root / "all_conversations.json"
+        manifest_path = args.output_root / "manifest.json"
+        for required_path in (cache_path, aggregate_path, manifest_path):
+            if not required_path.is_file():
+                raise FileNotFoundError(f"Add mode requires existing output file: {required_path}")
+        with PreparedSampleCacheReader(cache_path, args.output_root) as cache_reader:
+            existing_dataset_keys = cache_reader.dataset_keys()
+            duplicate_keys = [key for key in dataset_keys if key in existing_dataset_keys]
+            if duplicate_keys:
+                raise ValueError(
+                    "Add mode refuses to duplicate datasets already in the cache: "
+                    + ", ".join(duplicate_keys)
+                )
+            existing_conversation_samples = int(
+                cache_reader.meta("conversation_samples") or len(cache_reader)
+            )
+        for dataset_key in dataset_keys:
+            image_dir = args.output_root / str(config[dataset_key]["save_name"])
+            if image_dir.exists() and (
+                not image_dir.is_dir() or any(image_dir.iterdir())
+            ):
+                raise FileExistsError(
+                    f"Add target directory already contains files but has no cache records: {image_dir}"
+                )
+        manifest = json_load(manifest_path)
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("datasets"), dict):
+            raise TypeError(f"Existing manifest has an invalid structure: {manifest_path}")
+        log_path = configure_logging(args.log_level, args.output_root, append=True)
+        LOGGER.info("=" * 80)
+        LOGGER.info("Add run started; existing output will be preserved; log file: %s", log_path)
+    else:
+        output_existed = args.output_root.exists()
+        if not confirm_and_reset_output_root(args.output_root):
+            print("已取消生成，现有输出文件夹未作任何修改。")
+            return 0
+        log_path = configure_logging(args.log_level, args.output_root)
+        LOGGER.info("Generation run started; log file: %s", log_path)
+        if output_existed:
+            LOGGER.info("Previous output directory was fully removed before this run.")
+        manifest = {
+            "config": str(args.config.resolve()),
+            "output_root": str(args.output_root.resolve(strict=False)),
+            "prepared_cache": CACHE_FILE_NAME,
+            "prepared_cache_schema": CACHE_SCHEMA_VERSION,
+            "bbox_format": "[x_min, y_min, x_max, y_max], normalized to final saved image, 4 decimals",
+            "datasets": {},
+        }
+    LOGGER.info("Config: %s; output root: %s", args.config.resolve(), args.output_root.resolve())
+    configure_inno_runtime(args.gpu_index, args.trt_python)
     rng = random.Random(args.seed)
-    manifest: dict[str, Any] = {
-        "config": str(args.config.resolve()),
-        "output_root": str(args.output_root.resolve(strict=False)),
-        "prepared_cache": CACHE_FILE_NAME,
-        "prepared_cache_schema": CACHE_SCHEMA_VERSION,
-        "bbox_format": "[x_min, y_min, x_max, y_max], normalized to final saved image, 4 decimals",
-        "datasets": {},
-    }
     output_dataset_info: dict[str, Any] = {
         "max_v1_single": {
             "file_name": "all_conversations.json",
@@ -3242,14 +3672,23 @@ def main() -> int:
         if answer not in {"y", "yes"}:
             raise RuntimeError("Generation cancelled after all dataset previews.")
 
-    total_samples = 0
+    new_samples = 0
     aggregate_path = args.output_root / "all_conversations.json"
-    aggregate_context = contextlib.nullcontext(None) if args.dry_run else JsonArrayWriter(aggregate_path)
+    aggregate_context = (
+        contextlib.nullcontext(None)
+        if args.dry_run or add_mode
+        else JsonArrayWriter(aggregate_path)
+    )
     cache_path = args.output_root / CACHE_FILE_NAME
     cache_context = (
         contextlib.nullcontext(None)
         if args.dry_run
-        else PreparedSampleCacheWriter(cache_path, args.output_root, args.config)
+        else PreparedSampleCacheWriter(
+            cache_path,
+            args.output_root,
+            args.config,
+            append=add_mode,
+        )
     )
     # Keep the cache context outermost so a failure while atomically finalizing
     # all_conversations.json resets the cache's completion marker.
@@ -3265,7 +3704,7 @@ def main() -> int:
                 aggregate_writer,
                 cache_writer,
             )
-            total_samples += stats.written
+            new_samples += stats.written
             manifest["datasets"][dataset_key] = {
                 "save_name": dataset_config["save_name"],
                 "format": dataset_config["format"],
@@ -3274,16 +3713,25 @@ def main() -> int:
             }
             LOGGER.info("[%s] Generated %d VLM samples.", dataset_key, stats.written)
         if cache_writer is not None:
-            cache_writer.mark_complete(total_samples)
+            cache_writer.mark_complete(existing_conversation_samples + new_samples)
 
+    total_samples = existing_conversation_samples + new_samples
     manifest["total_samples"] = total_samples
     if not args.dry_run:
         atomic_json_dump(manifest, args.output_root / "manifest.json")
+        if add_mode:
+            LOGGER.info(
+                "Added %d samples; rebuilding the combined conversation JSON from cache.",
+                new_samples,
+            )
+            adjust_conversations(config, args.config, args.output_root)
+            LOGGER.info("Add run completed successfully; total samples: %d", total_samples)
+            return 0
         atomic_json_dump(output_dataset_info, args.output_root / "dataset_info.json")
         LOGGER.info("Combined dataset written to %s", aggregate_path)
         LOGGER.info("Prepared sample cache written to %s", cache_path)
     else:
-        LOGGER.info("Dry run complete: %d samples would be generated.", total_samples)
+        LOGGER.info("Dry run complete: %d new samples would be generated.", new_samples)
     LOGGER.info("Generation run completed successfully; total samples: %d", total_samples)
     return 0
 
