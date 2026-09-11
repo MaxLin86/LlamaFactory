@@ -1,10 +1,11 @@
 ### model
 # model_name_or_path: Qwen/Qwen3-VL-4B-Instruct
-model_name_or_path: /media/maxlin/SATA/modelscope/Qwen3-VL-2B-Instruct
+model_name_or_path: /media/maxlin/SATA/modelscope/Qwen3-VL-4B-Instruct
 image_max_pixels: 262144 #512*512
 image_min_pixels: 16384 #128*128
 # video_max_pixels: 65536 #256*256
 trust_remote_code: true
+resume_from_checkpoint: /home/maxlin/桌面/LlamaFactory/saves/qwen3-vl-4b/inno_report_loraSTF_max_v1_single_exp1_all_epoch1_openVIT_bs1/checkpoint-30000
 
 ### method
 stage: sft
@@ -34,9 +35,9 @@ overwrite_cache: false  # false则使用已缓存的预处理数据，true则重
 # max_samples: 5000       # 小批量调试开启，否则关闭
 
 ### output
-output_dir: saves/qwen3-vl-2b/inno_report_loraSTF_max_v1_single_exp4_all_epoch1_openVIT_bs2
+output_dir: saves/qwen3-vl-4b/inno_report_loraSTF_max_v1_single_exp1_all_epoch1_openVIT_bs1
 logging_steps: 100
-save_steps: 10000         # 小批量调试开启 100/5000
+save_steps: 2000         # 小批量调试开启 100/5000
 save_total_limit: 3     # 旧checkpoint会被自动清理
 # save_strategy: epoch
 plot_loss: true
@@ -45,8 +46,8 @@ save_only_model: false
 report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
 
 ### train
-per_device_train_batch_size: 2  
-gradient_accumulation_steps: 4
+per_device_train_batch_size: 1  
+gradient_accumulation_steps: 8
 learning_rate: 1.0e-4
 num_train_epochs: 1.0
 lr_scheduler_type: cosine
@@ -59,13 +60,12 @@ greater_is_better: false
 
 bf16: true
 ddp_timeout: 180000000
-resume_from_checkpoint: null
 flash_attn: fa2
 
 
 #val_size: 0.1
 val_size: 20000           # 小批量调试开启 500/20000
-per_device_eval_batch_size: 4
+per_device_eval_batch_size: 1
 eval_strategy: steps
 eval_steps: 10000         # 小批量调试开启 100/5000
 # eval_strategy: epoch
