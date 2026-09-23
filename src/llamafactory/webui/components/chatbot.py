@@ -32,6 +32,24 @@ if TYPE_CHECKING:
     from ..engine import Engine
 
 
+QUICK_QUESTION_CHOICES = (
+    ("1. 这是肠镜图像还是胃镜图像？", "这是肠镜图像还是胃镜图像？"),
+    ("2. 该图像所处的消化道大类位置是什么？", "该图像所处的消化道大类位置是什么？"),
+    ("3. 该图像所处的具体位置是什么？", "该图像所处的具体位置是什么？"),
+    ("4. 该图像是什么光源？", "该图像是什么光源？"),
+    ("5. 该图像是否有染色？", "该图像是否有染色？"),
+    ("6. 该图像是否有手术帽？", "该图像是否有手术帽？"),
+    ("7. 该图像中是否有器械？", "该图像中是否有器械？"),
+    ("8. 该图像是否开启放大？", "该图像是否开启放大？"),
+    ("9. 该图像质量如何？", "该图像质量如何？"),
+    ("10. 该图像在体内还是体外？", "该图像在体内还是体外？"),
+    ("11. 该病变的形态学表现是什么？", "该病变的形态学表现是什么？"),
+    ("12. 该病变的病理结论是什么？", "该病变的病理结论是什么？"),
+    ("13. 请进行CADX：鉴别图像中的病变，并给出诊断及相应分级。", "请进行CADX：鉴别图像中的病变，并给出诊断及相应分级。"),
+    ("14. 请进行CADE：图像上是否有病变存在？若有，请指出病变位置。", "请进行CADE：图像上是否有病变存在？若有，请指出病变位置。"),
+)
+
+
 def check_json_schema(text: str, lang: str) -> None:
     r"""Check if the json schema is valid."""
     try:
@@ -87,6 +105,12 @@ def create_chat_box(
                             bbox_plot_btn = gr.Button()
                             bbox_clear_btn = gr.Button()
 
+                quick_question = gr.Dropdown(
+                    choices=QUICK_QUESTION_CHOICES,
+                    value=None,
+                    allow_custom_value=False,
+                    filterable=True,
+                )
                 query = gr.Textbox(show_label=False, lines=8)
                 submit_btn = gr.Button(variant="primary")
 
@@ -101,6 +125,15 @@ def create_chat_box(
                 clear_btn = gr.Button()
 
     tools.input(check_json_schema, inputs=[tools, engine.manager.get_elem_by_id("top.lang")])
+
+    # ``input`` only reacts to a user selection. Resetting the dropdown as an
+    # event output therefore allows the same preset to be selected repeatedly.
+    quick_question.input(
+        lambda question: (question or "", None),
+        inputs=[quick_question],
+        outputs=[query, quick_question],
+        queue=False,
+    )
 
     submit_btn.click(
         engine.chatter.append,
@@ -152,6 +185,7 @@ def create_chat_box(
             bbox_clear_btn=bbox_clear_btn,
             video=video,
             audio=audio,
+            quick_question=quick_question,
             query=query,
             submit_btn=submit_btn,
             max_new_tokens=max_new_tokens,

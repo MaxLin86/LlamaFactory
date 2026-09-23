@@ -2673,6 +2673,28 @@ LOCALES = {
             "placeholder": "入力...",
         },
     },
+    "quick_question": {
+        "en": {
+            "label": "Quick question",
+            "info": "Select a standard prompt to place it in the input box.",
+        },
+        "ru": {
+            "label": "Быстрый вопрос",
+            "info": "Выберите стандартный запрос, чтобы поместить его в поле ввода.",
+        },
+        "zh": {
+            "label": "快捷问题",
+            "info": "编号固定对应问题类型，选择后将无编号的标准问法填入输入框。",
+        },
+        "ko": {
+            "label": "빠른 질문",
+            "info": "표준 프롬프트를 입력란에 넣으려면 선택하세요.",
+        },
+        "ja": {
+            "label": "クイック質問",
+            "info": "標準プロンプトを入力欄に入れるには選択してください。",
+        },
+    },
     "submit_btn": {
         "en": {
             "value": "Submit",
