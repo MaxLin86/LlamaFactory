@@ -37,6 +37,7 @@ BOX_PATTERN = re.compile(r"[\[【]\s*([^\]】]+?)\s*[\]】]")
 NUMBER_PATTERN = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
 
 GS_QUESTIONS: tuple[str, ...] = (
+    "请进行CADE：图像上是否有病变存在？若有，请指出病变位置。",
     "这是肠镜图像还是胃镜图像？",
     "该图像所处的具体位置是什么？",
     "该图像是什么光源？",
@@ -46,12 +47,17 @@ GS_QUESTIONS: tuple[str, ...] = (
     "该图像是否开启放大？",
     "该图像质量如何？",
     "该图像在体内还是体外？",
-    "请进行CADE：图像上是否有病变存在？若有，请指出病变位置。",
 )
 
 # Union of the questions found in the cs_det_1cls and cs_cadx_2cls preview
 # conversations.  Pathology is intentionally absent; morphology is retained.
 CS_QUESTIONS: tuple[str, ...] = (
+    "请进行CADE：图像上是否有病变存在？若有，请指出病变位置。",
+    "请进行CADX：判断图像中肠息肉的NICE分型；如有多个目标，请逐一回答。",
+    (
+        "请进行CADX：判断图像中的肠息肉属于肿瘤性病变还是非肿瘤性病变；"
+        "如有多个目标，请逐一回答。"
+    ),
     "这是肠镜图像还是胃镜图像？",
     "该图像所处的具体位置是什么？",
     "该图像是什么光源？",
@@ -61,9 +67,7 @@ CS_QUESTIONS: tuple[str, ...] = (
     "该图像是否开启放大？",
     "该图像质量如何？",
     "该图像在体内还是体外？",
-    "请进行CADE：图像上是否有病变存在？若有，请指出病变位置。",
     "该病变的形态学表现是什么？",
-    "请进行CADX：鉴别图像中的病变，并给出诊断及相应分级。",
 )
 
 

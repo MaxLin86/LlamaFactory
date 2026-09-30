@@ -32,7 +32,9 @@ Run modes::
     # Add only datasets absent from an existing completed output.
     python data/inno_report_data/data_generate_single_images.py --run-mode add --datasets cs_qc_5cls
 
-    # Rebuild conversations from cache without touching images.
+    # Rebuild conversations and matching previews from cache without touching
+    # images; writes all_conversations_change_YYYYMMDD.json and
+    # previews_change_YYYYMMDD/ while preserving the original dataset.
     python data/inno_report_data/data_generate_single_images.py --run-mode adjust
 """
 
@@ -55,6 +57,7 @@ import textwrap
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
 
@@ -231,14 +234,22 @@ STATUS_QUESTIONS = {
 }
 
 # Some classification annotations contain only a grading code. The existing
-# dataset description supplies the missing task-level meaning for the answer,
-# while the question remains disease-agnostic and therefore leaks no label.
+# dataset description supplies the missing task-level meaning for the answer.
 CADX_DESCRIPTION_SUBJECT_RULES = (
     ("反流性食管炎la分级", "反流性食管炎"),
-    ("溃疡ahs分期", "消化性溃疡"),
-    ("溃疡forrest分级", "消化性溃疡"),
+    ("溃疡ahs分期", "胃溃疡"),
+    ("溃疡forrest分级", "胃溃疡"),
     ("nice分型", "结直肠病变"),
 )
+
+CADX_DATASET_QUESTIONS = {
+    "gs_exp_refluxla_4cls": "请对反流性食管炎进行CADX：判断其LA分级。",
+    "gs_exp_ulcerahs_6cls": "请对胃溃疡进行CADX：判断其AHS分期。",
+    "gs_exp_ulcerforrest_6cls": "请对胃溃疡进行CADX：判断其Forrest分级。",
+}
+
+IPCL_DATASET_KEY = "gs_exp_ipcl_5cls"
+IPCL_CADX_QUESTION = "请对疑似食管癌进行CADX-AB分型，若存在，请给出具体位置。"
 
 
 class TimestampedMultilineFormatter(logging.Formatter):
@@ -1318,6 +1329,41 @@ class PreparedSampleCacheReader:
         rows = self.connection.execute("SELECT DISTINCT dataset_key FROM samples")
         return {str(row[0]) for row in rows}
 
+    def _decode_sample_row(
+        self,
+        row: sqlite3.Row,
+    ) -> tuple[ImageRecord, PreparedImage, dict[str, Any]]:
+        image_path = self.output_root / str(row["image_relpath"])
+        metadata = json.loads(row["metadata_json"])
+        boxes = [
+            Box(
+                tuple(float(value) for value in item["xyxy"]),
+                item.get("label_id"),
+                item.get("label"),
+                item.get("raw") or {},
+            )
+            for item in json.loads(row["boxes_json"])
+        ]
+        record = ImageRecord(
+            dataset_key=str(row["dataset_key"]),
+            source_path=image_path,
+            source_root=self.output_root,
+            root_index=0,
+            split=str(row["split"]),
+            label_ids=[str(value) for value in json.loads(row["label_ids_json"])],
+            labels=[str(value) for value in json.loads(row["labels_json"])],
+            boxes=boxes,
+            metadata=metadata,
+        )
+        prepared = PreparedImage(
+            path=image_path,
+            boxes=boxes,
+            metadata=metadata,
+            width=int(row["width"]),
+            height=int(row["height"]),
+        )
+        return record, prepared, json.loads(row["resolved_info_json"])
+
     def samples(self) -> Iterator[tuple[ImageRecord, PreparedImage, dict[str, Any]]]:
         if self.connection is None:
             raise RuntimeError("Prepared sample cache is not open.")
@@ -1329,37 +1375,47 @@ class PreparedSampleCacheReader:
             ORDER BY sample_order
         """
         for row in self.connection.execute(query):
-            image_path = self.output_root / str(row["image_relpath"])
-            metadata = json.loads(row["metadata_json"])
-            boxes = [
-                Box(
-                    tuple(float(value) for value in item["xyxy"]),
-                    item.get("label_id"),
-                    item.get("label"),
-                    item.get("raw") or {},
-                )
-                for item in json.loads(row["boxes_json"])
-            ]
-            record = ImageRecord(
-                dataset_key=str(row["dataset_key"]),
-                source_path=image_path,
-                source_root=self.output_root,
-                root_index=0,
-                split=str(row["split"]),
-                label_ids=[str(value) for value in json.loads(row["label_ids_json"])],
-                labels=[str(value) for value in json.loads(row["labels_json"])],
-                boxes=boxes,
-                metadata=metadata,
+            yield self._decode_sample_row(row)
+
+    def random_dataset_samples(
+        self,
+        dataset_key: str,
+        count: int,
+        rng: random.Random,
+    ) -> list[tuple[ImageRecord, PreparedImage, dict[str, Any]]]:
+        """Read a small random sample without decoding the entire cache."""
+
+        if self.connection is None:
+            raise RuntimeError("Prepared sample cache is not open.")
+        sample_orders = [
+            int(row[0])
+            for row in self.connection.execute(
+                "SELECT sample_order FROM samples WHERE dataset_key = ? ORDER BY sample_order",
+                (dataset_key,),
             )
-            prepared = PreparedImage(
-                path=image_path,
-                boxes=boxes,
-                metadata=metadata,
-                width=int(row["width"]),
-                height=int(row["height"]),
-            )
-            resolved_info = json.loads(row["resolved_info_json"])
-            yield record, prepared, resolved_info
+        ]
+        selected_orders = sorted(rng.sample(sample_orders, k=min(count, len(sample_orders))))
+        if not selected_orders:
+            return []
+
+        result: list[tuple[int, ImageRecord, PreparedImage, dict[str, Any]]] = []
+        # Stay below SQLite's commonly configured 999-variable limit.
+        for start in range(0, len(selected_orders), 900):
+            chunk = selected_orders[start : start + 900]
+            placeholders = ",".join("?" for _ in chunk)
+            query = f"""
+                SELECT sample_order, dataset_key, record_index, split, image_relpath,
+                       width, height, label_ids_json, labels_json, boxes_json,
+                       metadata_json, resolved_info_json
+                FROM samples
+                WHERE sample_order IN ({placeholders})
+                ORDER BY sample_order
+            """
+            for row in self.connection.execute(query, chunk):
+                record, prepared, resolved_info = self._decode_sample_row(row)
+                result.append((int(row["sample_order"]), record, prepared, resolved_info))
+        result.sort(key=lambda item: item[0])
+        return [(record, prepared, resolved_info) for _, record, prepared, resolved_info in result]
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         if self.connection is not None:
@@ -2416,7 +2472,10 @@ def show_single_preview(
     for box in prepared.boxes:
         display_box = tuple(value * display_scale for value in box.xyxy)
         draw.rectangle(display_box, outline=(255, 40, 40), width=line_width)
-        label = box.label or box.label_id
+        label = normalize_digestive_polyp_label(
+            box.label or box.label_id,
+            record.dataset_key,
+        )
         if label:
             text_y = max(0.0, display_box[1] - getattr(font, "size", 16) - 2)
             draw.text((display_box[0] + 2, text_y), str(label), fill=(255, 40, 40), font=font)
@@ -2541,6 +2600,7 @@ def make_preview_info_text(
                     label = record.labels[index]
                 if label is None and len(record.labels) == 1:
                     label = record.labels[0]
+                label = normalize_digestive_polyp_label(label, dataset_key)
                 lesions.append(
                     {
                         "目标": label or "目标",
@@ -2970,6 +3030,19 @@ def semantic_prediction_answer(value: Any) -> str:
     return CONFIDENCE_SUFFIX_PATTERN.sub("", text).strip()
 
 
+def normalize_digestive_polyp_label(value: Any, dataset_key: str) -> Any:
+    """Disambiguate a standalone polyp label by upper/lower GI dataset."""
+
+    if str(value).strip() != "息肉":
+        return value
+    normalized_key = dataset_key.casefold()
+    if normalized_key.startswith("gs_"):
+        return "胃息肉"
+    if normalized_key.startswith("cs_"):
+        return "肠息肉"
+    return value
+
+
 def category_contains_chinese(value: Any) -> bool:
     """Whether the displayed category contains a meaningful Chinese label."""
 
@@ -3028,6 +3101,7 @@ def box_display_label(box: Box, record: ImageRecord, index: int) -> str:
         label = record.labels[index]
     if label is None and len(record.labels) == 1:
         label = record.labels[0]
+    label = normalize_digestive_polyp_label(label, record.dataset_key)
     return str(label or "目标")
 
 
@@ -3053,6 +3127,9 @@ def build_per_target_cadx_qa(
 ) -> tuple[str, str] | None:
     """Build one diagnosis line for every lesion on a merged full image."""
 
+    dataset_key = record.dataset_key.casefold()
+    is_nice_task = dataset_key == "cs_nice_3cls"
+    is_nature_task = dataset_key == "cs_cadx_2cls"
     values: list[dict[str, Any]] = []
     for index, box in enumerate(prepared.boxes, start=1):
         label = box_display_label(box, record, index - 1)
@@ -3066,16 +3143,28 @@ def build_per_target_cadx_qa(
         values.append(
             {
                 "target_index": index,
-                "value": cadx_answer_with_description(label, config),
+                "value": (
+                    label
+                    if is_nice_task or is_nature_task
+                    else cadx_answer_with_description(label, config)
+                ),
             }
         )
     if not values:
         return None
-    question = (
-        "请进行CADX：鉴别图像中的病变，并给出诊断及相应分级。"
-        if len(prepared.boxes) == 1
-        else "请进行CADX：逐一鉴别图像中的目标，并给出诊断及相应分级。"
-    )
+    if is_nice_task:
+        question = "请进行CADX：判断图像中肠息肉的NICE分型；如有多个目标，请逐一回答。"
+    elif is_nature_task:
+        question = (
+            "请进行CADX：判断图像中的肠息肉属于肿瘤性病变还是非肿瘤性病变；"
+            "如有多个目标，请逐一回答。"
+        )
+    else:
+        question = (
+            "请进行CADX：鉴别图像中的病变，并给出诊断及相应分级。"
+            if len(prepared.boxes) == 1
+            else "请进行CADX：逐一鉴别图像中的目标，并给出诊断及相应分级。"
+        )
     return question, per_target_answer(values, len(prepared.boxes))
 
 
@@ -3093,12 +3182,17 @@ def build_cade_qa(
     if target_spec is None:
         return None
 
-    is_cleanliness = is_bowel_cleanliness_dataset(record.dataset_key)
-    question = (
-        "图像上是否有肠道清洁不到位的区域，例如粪渣、粪块、粪水、气泡等杂质？"
-        if is_cleanliness
-        else "请进行CADE：图像上是否有病变存在？若有，请指出病变位置。"
-    )
+    dataset_key = record.dataset_key.casefold()
+    is_cleanliness = is_bowel_cleanliness_dataset(dataset_key)
+    if is_cleanliness:
+        question = "图像上是否有肠道清洁不到位的区域，例如粪渣、粪块、粪水、气泡等杂质？"
+    elif dataset_key == IPCL_DATASET_KEY:
+        # IPCL jointly supervises A/B subtype classification and localization.
+        # Keep the existing positive/negative and single/multi-target answers;
+        # only the task-specific question changes.
+        question = IPCL_CADX_QUESTION
+    else:
+        question = "请进行CADE：图像上是否有病变存在？若有，请指出病变位置。"
     if not prepared.boxes:
         answer = (
             "未发现清洁不到位区域。"
@@ -3110,6 +3204,10 @@ def build_cade_qa(
     width, height = prepared_image_size(prepared, record.source_path)
     details: list[str] = []
     per_lesion_cadx = bool(config.get("per_lesion_cadx"))
+    is_colorectal_polyp_task = record.dataset_key.casefold() in {
+        "cs_nice_3cls",
+        "cs_cadx_2cls",
+    }
     single_target = len(prepared.boxes) == 1
     false_positive_flags: list[bool] = []
     for index, box in enumerate(prepared.boxes):
@@ -3119,11 +3217,17 @@ def build_cade_qa(
         false_positive_flags.append(is_false_positive)
         if per_lesion_cadx:
             if single_target:
-                label = "疑似假阳" if is_false_positive else "病变"
+                label = (
+                    "疑似假阳"
+                    if is_false_positive
+                    else ("肠息肉" if is_colorectal_polyp_task else "病变")
+                )
             else:
                 label = f"目标{index + 1}"
                 if is_false_positive:
                     label += "（疑似假阳）"
+                elif is_colorectal_polyp_task:
+                    label += "（肠息肉）"
         else:
             label = diagnosis_label
         detail_prefix = "" if single_target else f"{index + 1}. "
@@ -3136,12 +3240,7 @@ def build_cade_qa(
         if per_lesion_cadx and all(false_positive_flags)
         else "有。"
     )
-    answer = (
-        answer_lead
-        + "\n"
-        + "\n".join(details)
-        + "\n坐标：归一化 xyxy [x_min, y_min, x_max, y_max]（0-1）。"
-    )
+    answer = answer_lead + "\n" + "\n".join(details)
     return question, answer
 
 
@@ -3154,7 +3253,8 @@ def build_conversations(
 ) -> list[dict[str, str]]:
     info = config.get("info", {})
     qas: list[tuple[str, str]] = []
-    lesion_qas: list[tuple[str, str]] = []
+    priority_qas: list[tuple[str, str]] = []
+    morphology_qas: list[tuple[str, str]] = []
     per_lesion_cadx = bool(config.get("per_lesion_cadx"))
 
     resolved_info = resolved_info or {}
@@ -3219,13 +3319,20 @@ def build_conversations(
                             if canonical_name == "lesion_morphology"
                             else "图像中各目标的病理结论是什么？"
                         )
-                    lesion_qas.append(
-                        (question, per_target_answer(target_values, len(prepared.boxes)))
-                    )
+                    qa = (question, per_target_answer(target_values, len(prepared.boxes)))
+                    if canonical_name == "lesion_morphology":
+                        morphology_qas.append(qa)
+                    else:
+                        qas.append(qa)
                 continue
-            qas.append(
-                (status_question(canonical_name), status_answer(canonical_name, status_value[raw_name]))
+            qa = (
+                status_question(canonical_name),
+                status_answer(canonical_name, status_value[raw_name]),
             )
+            if canonical_name == "lesion_morphology":
+                morphology_qas.append(qa)
+            else:
+                qas.append(qa)
     elif is_useful(status_value):
         qas.append(("该图像的状态是什么？", semantic_prediction_answer(status_value)))
 
@@ -3236,13 +3343,10 @@ def build_conversations(
         # target2, ... without an arbitrary or ambiguous ordering.
         cade_qa = build_cade_qa(record, prepared, target_spec, config)
         if cade_qa is not None:
-            qas.append(cade_qa)
-        qas.extend(lesion_qas)
+            priority_qas.append(cade_qa)
         cadx_qa = build_per_target_cadx_qa(record, prepared, config)
         if cadx_qa is not None:
-            qas.append(cadx_qa)
-    else:
-        qas.extend(lesion_qas)
+            priority_qas.append(cadx_qa)
 
     category = preview_category_value(record, config) if target_spec is None else None
     category_answer = plain_answer(category) if is_useful(category) else ""
@@ -3253,16 +3357,19 @@ def build_conversations(
         and category_contains_chinese(category)
         and category_answer != location_answer
     ):
-        question = "请进行CADX：鉴别图像中的病变，并给出诊断及相应分级。"
-        qas.append((question, cadx_answer_with_description(category_answer, config)))
+        question = CADX_DATASET_QUESTIONS.get(
+            dataset_key,
+            "请进行CADX：鉴别图像中的病变，并给出诊断及相应分级。",
+        )
+        priority_qas.append((question, cadx_answer_with_description(category_answer, config)))
 
     if not per_lesion_cadx:
         cade_qa = build_cade_qa(record, prepared, target_spec, config)
         if cade_qa is not None:
-            qas.append(cade_qa)
+            priority_qas.append(cade_qa)
 
     conversations: list[dict[str, str]] = []
-    for question, answer in qas:
+    for question, answer in priority_qas + qas + morphology_qas:
         if not is_useful(answer):
             continue
         if not conversations:
@@ -3284,7 +3391,11 @@ def make_vlm_sample(
     if not conversations:
         return None
     sample_image = image_path or prepared.path
-    return {"images": [str(sample_image.resolve(strict=False))], "conversations": conversations}
+    # Cached adjust-mode paths are already absolute.  Resolving every one of
+    # 870k+ paths performs needless filesystem lookups on the image HDD.
+    if not sample_image.is_absolute():
+        sample_image = sample_image.resolve(strict=False)
+    return {"images": [str(sample_image)], "conversations": conversations}
 
 
 def build_one_dataset(
@@ -3415,7 +3526,12 @@ def select_dataset_keys(config: dict[str, Any], requested: Sequence[str] | None)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Path to rules.json.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG,
+        help=f"Dataset rules file (default: {DEFAULT_CONFIG}).",
+    )
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -3428,7 +3544,7 @@ def parse_args() -> argparse.Namespace:
         default="full",
         help=(
             "full: replace all output; add: append new --datasets to an existing completed output; "
-            "adjust: rebuild only dialogues from the completed cache."
+            "adjust: rebuild dialogues and matching previews from the completed cache."
         ),
     )
     parser.add_argument(
@@ -3436,13 +3552,14 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         help=(
             "Dataset keys to build; accepts spaces or comma-separated values. "
-            "Required by add mode; full mode defaults to all."
+            "Required by add mode; full mode and adjust previews default to all."
         ),
     )
     parser.add_argument(
         "--seed",
         type=int,
-        help="Optional fixed seed for reproducible previews; omit it to sample different images each run.",
+        default=2026,
+        help="Random seed used for reproducible previews (default: 2026).",
     )
     parser.add_argument("--preview-count", type=int, default=10, help="Random GT images shown per sub-dataset.")
     parser.add_argument(
@@ -3451,23 +3568,113 @@ def parse_args() -> argparse.Namespace:
         default="show",
         help="show: interactively show/save each image; save: only save detailed images; none: disable.",
     )
-    parser.add_argument("--yes", action="store_true", help="Continue without the per-dataset text confirmation.")
-    parser.add_argument("--search-depth", type=int, default=6, help="Maximum metadata/sub-folder discovery depth.")
-    parser.add_argument("--limit", type=int, help="Maximum records per dataset, useful for smoke tests.")
-    parser.add_argument("--dry-run", action="store_true", help="Discover and validate without copying/writing output.")
-    parser.add_argument("--gpu-index", type=int, default=0, help="CUDA device index used by TensorRTInfer.")
-    parser.add_argument(
-        "--trt-python",
-        type=Path,
-        default=DEFAULT_TRT_PYTHON,
-        help=f"Python interpreter containing TensorRT/PyCUDA (default: {DEFAULT_TRT_PYTHON}).",
-    )
-    parser.add_argument("--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
     return parser.parse_args()
 
 
-def adjust_conversations(config: dict[str, Any], config_path: Path, output_root: Path) -> int:
-    """Atomically rebuild conversations from cache without touching prepared images."""
+def generate_adjusted_previews(
+    config: dict[str, Any],
+    output_root: Path,
+    dataset_keys: Sequence[str],
+    count: int,
+    mode: str,
+    rng: random.Random,
+    date_stamp: str,
+    conversation_path: Path,
+) -> int:
+    """Create the dated preview set as part of one adjust run."""
+
+    preview_root = output_root / f"previews_change_{date_stamp}"
+    staging_root = output_root / f".previews_change_{date_stamp}.tmp"
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    staging_root.mkdir(parents=True)
+
+    LOGGER.info("Generating previews for adjusted conversation file: %s", conversation_path)
+    LOGGER.info("Preview output: %s", preview_root)
+
+    cache_path = output_root / CACHE_FILE_NAME
+    total_previews = 0
+    try:
+        with PreparedSampleCacheReader(cache_path, output_root) as cache_reader:
+            cached_dataset_keys = cache_reader.dataset_keys()
+            for dataset_key in dataset_keys:
+                if dataset_key not in cached_dataset_keys:
+                    LOGGER.warning("[%s] No cached samples; skipping preview.", dataset_key)
+                    continue
+                dataset_config = config[dataset_key]
+                save_name = str(dataset_config["save_name"])
+                samples = cache_reader.random_dataset_samples(dataset_key, count, rng)
+                preview_dir = staging_root / save_name
+                preview_dir.mkdir(parents=True, exist_ok=True)
+                preview_json_path = preview_dir / "preview_conversations.json"
+                preview_stats = BuildStats()
+                shown = 0
+                with JsonArrayWriter(preview_json_path) as preview_writer:
+                    for index, (record, prepared, resolved_info) in enumerate(samples, start=1):
+                        if not prepared.path.is_file():
+                            raise FileNotFoundError(f"Cached preview image is missing: {prepared.path}")
+                        sample = make_vlm_sample(
+                            record,
+                            prepared,
+                            dataset_config,
+                            preview_stats,
+                            resolved_info=resolved_info,
+                        )
+                        if sample is None:
+                            continue
+                        preview_writer.write(sample)
+                        destination = preview_dir / f"{index:02d}_{prepared.path.stem}.jpg"
+                        shown += 1
+                        try:
+                            show_single_preview(
+                                dataset_key,
+                                save_name,
+                                dataset_config,
+                                record,
+                                prepared,
+                                resolved_info,
+                                destination,
+                                index,
+                                len(samples),
+                                interactive=mode == "show",
+                            )
+                        except PreviewSkipped:
+                            LOGGER.info(
+                                "[%s] Remaining previews skipped at %d/%d.",
+                                dataset_key,
+                                index,
+                                len(samples),
+                            )
+                            break
+                total_previews += shown
+                LOGGER.info(
+                    "[%s] Saved %d adjusted previews and conversations.",
+                    dataset_key,
+                    shown,
+                )
+        if preview_root.exists():
+            shutil.rmtree(preview_root)
+        os.replace(staging_root, preview_root)
+    finally:
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+    LOGGER.info("Adjusted previews completed; total=%d, output=%s", total_previews, preview_root)
+    return 0
+
+
+def adjust_conversations(
+    config: dict[str, Any],
+    config_path: Path,
+    output_root: Path,
+    *,
+    dated_output: bool = True,
+    preview_dataset_keys: Sequence[str] = (),
+    preview_count: int = 10,
+    preview_mode: str = "none",
+    preview_rng: random.Random | None = None,
+    log_level: str = "INFO",
+) -> int:
+    """Atomically rebuild conversations and matching previews from the cache."""
 
     global _SKIP_MODEL_INFERENCE
     _SKIP_MODEL_INFERENCE = True
@@ -3475,71 +3682,99 @@ def adjust_conversations(config: dict[str, Any], config_path: Path, output_root:
         raise FileNotFoundError(
             f"Adjust mode requires an existing full-run output directory: {output_root}"
         )
-    log_path = configure_logging("INFO", output_root, append=True)
+    log_path = configure_logging(log_level, output_root, append=True)
     LOGGER.info("=" * 80)
     LOGGER.info("Conversation adjustment run started; log appended to %s", log_path)
     LOGGER.info("Config: %s; output root: %s", config_path.resolve(), output_root.resolve())
     cache_path = output_root / CACHE_FILE_NAME
-    aggregate_path = output_root / "all_conversations.json"
+    date_stamp = datetime.now().strftime("%Y%m%d")
+    aggregate_file_name = (
+        f"all_conversations_change_{date_stamp}.json"
+        if dated_output
+        else "all_conversations.json"
+    )
+    aggregate_path = output_root / aggregate_file_name
     stats = BuildStats()
     dataset_counts: dict[str, int] = defaultdict(int)
+    verified_image_datasets: set[str] = set()
 
-    with PreparedSampleCacheReader(cache_path, output_root) as cache_reader:
-        stats.discovered = len(cache_reader)
-        for dataset_key, dataset_config in config.items():
-            if not dataset_config.get("merge_original_lesions"):
-                continue
-            cached = cache_reader.first_metadata(dataset_key)
-            if cached is not None and cached.get("_prepared_level") != "ori":
-                raise RuntimeError(
-                    f"Cached dataset {dataset_key!r} predates the merged-original-image pipeline. "
-                    "Run --run-mode full before using adjust."
-                )
-        with JsonArrayWriter(aggregate_path) as aggregate_writer:
-            with tqdm(
-                cache_reader.samples(),
-                total=len(cache_reader),
-                desc="[adjust] 重建对话",
-                unit="条",
-                dynamic_ncols=True,
-                leave=True,
-            ) as progress:
-                for record, prepared, resolved_info in progress:
-                    if not prepared.path.is_file():
-                        raise FileNotFoundError(
-                            f"Cached prepared image is missing; adjust mode will not recreate it: {prepared.path}"
-                        )
-                    dataset_config = config.get(record.dataset_key)
-                    if dataset_config is None:
-                        raise KeyError(
-                            f"Cached dataset {record.dataset_key!r} is absent from current rules.json."
-                        )
-                    if (
-                        dataset_config.get("merge_original_lesions")
-                        and prepared.metadata.get("_prepared_level") != "ori"
-                    ):
-                        raise RuntimeError(
-                            f"Cached dataset {record.dataset_key!r} was not prepared with the current "
-                            "merged-original-image pipeline. Run --run-mode full before using adjust."
-                        )
-                    sample = make_vlm_sample(
-                        record,
-                        prepared,
-                        dataset_config,
-                        stats,
-                        resolved_info=resolved_info,
+    # Read the large SQLite cache sequentially from the dataset disk while
+    # staging JSON on the system disk.  This avoids alternating HDD reads and
+    # writes; the completed JSON is copied back in one sequential operation.
+    with tempfile.TemporaryDirectory(prefix="llamafactory_adjust_") as staging_directory:
+        staged_aggregate_path = Path(staging_directory) / aggregate_file_name
+        with PreparedSampleCacheReader(cache_path, output_root) as cache_reader:
+            stats.discovered = len(cache_reader)
+            for dataset_key, dataset_config in config.items():
+                if not dataset_config.get("merge_original_lesions"):
+                    continue
+                cached = cache_reader.first_metadata(dataset_key)
+                if cached is not None and cached.get("_prepared_level") != "ori":
+                    raise RuntimeError(
+                        f"Cached dataset {dataset_key!r} predates the merged-original-image pipeline. "
+                        "Run --run-mode full before using adjust."
                     )
-                    if sample is None:
-                        stats.skipped_empty_dialogue += 1
-                        continue
-                    aggregate_writer.write(sample)
-                    stats.written += 1
-                    dataset_counts[record.dataset_key] += 1
-                    progress.set_postfix(
-                        generated=stats.written,
-                        skipped=stats.skipped_empty_dialogue,
-                        refresh=False,
-                    )
+            with JsonArrayWriter(staged_aggregate_path) as aggregate_writer:
+                with tqdm(
+                    cache_reader.samples(),
+                    total=len(cache_reader),
+                    desc="[adjust] 重建对话",
+                    unit="条",
+                    dynamic_ncols=True,
+                    leave=True,
+                ) as progress:
+                    for record, prepared, resolved_info in progress:
+                        # A completed cache already records every prepared image.
+                        # Checking all 870k+ paths here turns a dialogue-only run
+                        # into hours of random HDD metadata I/O, so verify one
+                        # representative image per dataset instead.
+                        if record.dataset_key not in verified_image_datasets:
+                            if not prepared.path.is_file():
+                                raise FileNotFoundError(
+                                    "Cached prepared image directory is unavailable; adjust mode will not "
+                                    f"recreate it: {prepared.path}"
+                                )
+                            verified_image_datasets.add(record.dataset_key)
+                        dataset_config = config.get(record.dataset_key)
+                        if dataset_config is None:
+                            raise KeyError(
+                                f"Cached dataset {record.dataset_key!r} is absent from current rules.json."
+                            )
+                        if (
+                            dataset_config.get("merge_original_lesions")
+                            and prepared.metadata.get("_prepared_level") != "ori"
+                        ):
+                            raise RuntimeError(
+                                f"Cached dataset {record.dataset_key!r} was not prepared with the current "
+                                "merged-original-image pipeline. Run --run-mode full before using adjust."
+                            )
+                        sample = make_vlm_sample(
+                            record,
+                            prepared,
+                            dataset_config,
+                            stats,
+                            resolved_info=resolved_info,
+                        )
+                        if sample is None:
+                            stats.skipped_empty_dialogue += 1
+                            continue
+                        aggregate_writer.write(sample)
+                        stats.written += 1
+                        dataset_counts[record.dataset_key] += 1
+                        if stats.written % 10_000 == 0:
+                            progress.set_postfix(
+                                generated=stats.written,
+                                skipped=stats.skipped_empty_dialogue,
+                                refresh=False,
+                            )
+
+        transfer_path = aggregate_path.with_suffix(aggregate_path.suffix + ".copying")
+        try:
+            shutil.copyfile(staged_aggregate_path, transfer_path)
+            os.replace(transfer_path, aggregate_path)
+        finally:
+            if transfer_path.exists():
+                transfer_path.unlink()
 
     for dataset_key, count in dataset_counts.items():
         LOGGER.info("[%s] Rebuilt %d conversation samples from cache.", dataset_key, count)
@@ -3555,22 +3790,66 @@ def adjust_conversations(config: dict[str, Any], config_path: Path, output_root:
         stats.written,
         stats.skipped_empty_dialogue,
     )
+    if dated_output:
+        dataset_info_path = output_root / "dataset_info.json"
+        dataset_info = json_load(dataset_info_path) if dataset_info_path.is_file() else {}
+        if not isinstance(dataset_info, dict):
+            raise TypeError(f"Existing dataset_info.json has an invalid structure: {dataset_info_path}")
+        for dataset_name, dataset_attributes in list(dataset_info.items()):
+            if not dataset_name.startswith("max_v1_single_change_"):
+                continue
+            file_name = (
+                dataset_attributes.get("file_name")
+                if isinstance(dataset_attributes, dict)
+                else None
+            )
+            if not file_name or not (output_root / str(file_name)).is_file():
+                del dataset_info[dataset_name]
+                LOGGER.info("Removed stale adjusted dataset registration: %s", dataset_name)
+        dataset_info[f"max_v1_single_change_{date_stamp}"] = {
+            "file_name": aggregate_file_name,
+            "formatting": "sharegpt",
+            "columns": {"messages": "conversations", "images": "images"},
+        }
+        atomic_json_dump(dataset_info, dataset_info_path)
+        LOGGER.info("Registered adjusted dataset in %s", dataset_info_path)
+        if preview_mode != "none":
+            generate_adjusted_previews(
+                config,
+                output_root,
+                preview_dataset_keys or tuple(config),
+                preview_count,
+                preview_mode,
+                preview_rng or random.Random(),
+                date_stamp,
+                aggregate_path,
+            )
     return 0
 
 
 def main() -> int:
     global _SKIP_MODEL_INFERENCE
     args = parse_args()
-    config = json_load(args.config)
+    config_path = args.config
+    config = json_load(config_path)
     if not isinstance(config, dict):
         raise TypeError("Top-level rules.json value must be an object.")
     validate_config(config)
     if args.run_mode == "adjust":
-        return adjust_conversations(config, args.config, args.output_root)
+        dataset_keys = select_dataset_keys(config, args.datasets)
+        return adjust_conversations(
+            config,
+            config_path,
+            args.output_root,
+            preview_dataset_keys=dataset_keys,
+            preview_count=args.preview_count,
+            preview_mode=args.preview_mode,
+            preview_rng=random.Random(args.seed),
+        )
     if args.run_mode == "add" and not args.datasets:
         raise ValueError("Add mode requires --datasets; implicit addition of every dataset is disabled.")
 
-    _SKIP_MODEL_INFERENCE = args.dry_run
+    _SKIP_MODEL_INFERENCE = False
     validate_output_is_separate(args.output_root, config)
     dataset_keys = select_dataset_keys(config, args.datasets)
     resolver = ImageResolver()
@@ -3609,7 +3888,7 @@ def main() -> int:
         manifest = json_load(manifest_path)
         if not isinstance(manifest, dict) or not isinstance(manifest.get("datasets"), dict):
             raise TypeError(f"Existing manifest has an invalid structure: {manifest_path}")
-        log_path = configure_logging(args.log_level, args.output_root, append=True)
+        log_path = configure_logging("INFO", args.output_root, append=True)
         LOGGER.info("=" * 80)
         LOGGER.info("Add run started; existing output will be preserved; log file: %s", log_path)
     else:
@@ -3617,20 +3896,20 @@ def main() -> int:
         if not confirm_and_reset_output_root(args.output_root):
             print("已取消生成，现有输出文件夹未作任何修改。")
             return 0
-        log_path = configure_logging(args.log_level, args.output_root)
+        log_path = configure_logging("INFO", args.output_root)
         LOGGER.info("Generation run started; log file: %s", log_path)
         if output_existed:
             LOGGER.info("Previous output directory was fully removed before this run.")
         manifest = {
-            "config": str(args.config.resolve()),
+            "config": str(config_path.resolve()),
             "output_root": str(args.output_root.resolve(strict=False)),
             "prepared_cache": CACHE_FILE_NAME,
             "prepared_cache_schema": CACHE_SCHEMA_VERSION,
             "bbox_format": "[x_min, y_min, x_max, y_max], normalized to final saved image, 4 decimals",
             "datasets": {},
         }
-    LOGGER.info("Config: %s; output root: %s", args.config.resolve(), args.output_root.resolve())
-    configure_inno_runtime(args.gpu_index, args.trt_python)
+    LOGGER.info("Config: %s; output root: %s", config_path.resolve(), args.output_root.resolve())
+    configure_inno_runtime(0, DEFAULT_TRT_PYTHON)
     rng = random.Random(args.seed)
     output_dataset_info: dict[str, Any] = {
         "max_v1_single": {
@@ -3644,7 +3923,7 @@ def main() -> int:
     for dataset_key in dataset_keys:
         dataset_config = config[dataset_key]
         LOGGER.info("[%s] Discovering %s dataset ...", dataset_key, dataset_config["format"])
-        records = discover_dataset_records(dataset_key, dataset_config, resolver, args.search_depth)
+        records = discover_dataset_records(dataset_key, dataset_config, resolver, 6)
         LOGGER.info("[%s] Discovered %d usable source images.", dataset_key, len(records))
         log_subfolder_counts(dataset_key, dataset_config, records)
         if not records:
@@ -3652,43 +3931,37 @@ def main() -> int:
             continue
         # Preview every dataset in discovery order. Final generation remains
         # deferred until all previews finish and the user confirms once.
-        if not args.dry_run:
-            preview_dataset(
-                dataset_key,
-                str(dataset_config["save_name"]),
-                dataset_config,
-                records,
-                args.output_root / "previews",
-                args.preview_count,
-                args.preview_mode,
-                rng,
-            )
+        preview_dataset(
+            dataset_key,
+            str(dataset_config["save_name"]),
+            dataset_config,
+            records,
+            args.output_root / "previews",
+            args.preview_count,
+            args.preview_mode,
+            rng,
+        )
         discovered_datasets.append((dataset_key, dataset_config, records))
 
-    if not args.dry_run and not args.yes:
-        if not sys.stdin.isatty():
-            raise RuntimeError("Final preview confirmation requires a TTY. Rerun with --yes to skip it.")
-        answer = input("全部数据集预览已完成。确认标注及全部 info 正确并开始统一生成？[y/N]: ").strip().casefold()
-        if answer not in {"y", "yes"}:
-            raise RuntimeError("Generation cancelled after all dataset previews.")
+    if not sys.stdin.isatty():
+        raise RuntimeError("Final preview confirmation requires an interactive terminal.")
+    answer = input("全部数据集预览已完成。确认标注及全部 info 正确并开始统一生成？[y/N]: ").strip().casefold()
+    if answer not in {"y", "yes"}:
+        raise RuntimeError("Generation cancelled after all dataset previews.")
 
     new_samples = 0
     aggregate_path = args.output_root / "all_conversations.json"
     aggregate_context = (
         contextlib.nullcontext(None)
-        if args.dry_run or add_mode
+        if add_mode
         else JsonArrayWriter(aggregate_path)
     )
     cache_path = args.output_root / CACHE_FILE_NAME
-    cache_context = (
-        contextlib.nullcontext(None)
-        if args.dry_run
-        else PreparedSampleCacheWriter(
-            cache_path,
-            args.output_root,
-            args.config,
-            append=add_mode,
-        )
+    cache_context = PreparedSampleCacheWriter(
+        cache_path,
+        args.output_root,
+        config_path,
+        append=add_mode,
     )
     # Keep the cache context outermost so a failure while atomically finalizing
     # all_conversations.json resets the cache's completion marker.
@@ -3699,8 +3972,8 @@ def main() -> int:
                 dataset_config,
                 records,
                 args.output_root,
-                args.dry_run,
-                args.limit,
+                False,
+                None,
                 aggregate_writer,
                 cache_writer,
             )
@@ -3717,21 +3990,18 @@ def main() -> int:
 
     total_samples = existing_conversation_samples + new_samples
     manifest["total_samples"] = total_samples
-    if not args.dry_run:
-        atomic_json_dump(manifest, args.output_root / "manifest.json")
-        if add_mode:
-            LOGGER.info(
-                "Added %d samples; rebuilding the combined conversation JSON from cache.",
-                new_samples,
-            )
-            adjust_conversations(config, args.config, args.output_root)
-            LOGGER.info("Add run completed successfully; total samples: %d", total_samples)
-            return 0
-        atomic_json_dump(output_dataset_info, args.output_root / "dataset_info.json")
-        LOGGER.info("Combined dataset written to %s", aggregate_path)
-        LOGGER.info("Prepared sample cache written to %s", cache_path)
-    else:
-        LOGGER.info("Dry run complete: %d new samples would be generated.", new_samples)
+    atomic_json_dump(manifest, args.output_root / "manifest.json")
+    if add_mode:
+        LOGGER.info(
+            "Added %d samples; rebuilding the combined conversation JSON from cache.",
+            new_samples,
+        )
+        adjust_conversations(config, config_path, args.output_root, dated_output=False)
+        LOGGER.info("Add run completed successfully; total samples: %d", total_samples)
+        return 0
+    atomic_json_dump(output_dataset_info, args.output_root / "dataset_info.json")
+    LOGGER.info("Combined dataset written to %s", aggregate_path)
+    LOGGER.info("Prepared sample cache written to %s", cache_path)
     LOGGER.info("Generation run completed successfully; total samples: %d", total_samples)
     return 0
 

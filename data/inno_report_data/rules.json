@@ -121,13 +121,13 @@
         "src_path": ["/media/maxlin/ECDatasets2/GI-DET01/GI-DET01-Train-D4",
                      "/media/maxlin/ECDatasets2/GI-DET01/GI-DET01-Test-D8",
                      "/media/maxlin/ECDatasets2/GI-DET01/GI-DET01-Test-D9"],
-        "description": "下消化道息肉检测数据集，仅1个阳性类，阳性框以box为单位",
+        "description": "下消化道肠息肉检测数据集，仅1个阳性类，阳性框以box为单位",
         "sub_folder": ["train", "val", "test"],
         "format": "COCO",
         "level": "crop",
         "info": {
             "label": ["1"],
-            "cls": ["息肉"],
+            "cls": ["肠息肉"],
             "target": "float_norm_from_bbox",
             "location": "model_run",
             "status": "model_run"}
