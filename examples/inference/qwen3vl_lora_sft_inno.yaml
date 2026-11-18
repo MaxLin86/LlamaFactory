@@ -1,6 +1,9 @@
+### CUDA_VISIBLE_DEVICES=0 python data/inno_report_data/eval_datset_quickly.py gs
+### CUDA_VISIBLE_DEVICES=0 llamafactory-cli webchat examples/inference/qwen3vl_lora_sft_inno.yaml
+
 ### model
 model_name_or_path: /media/maxlin/SATA/modelscope/Qwen3-VL-2B-Instruct
-adapter_name_or_path: /home/maxlin/桌面/LlamaFactory/saves/qwen3-vl-2b/inno_report_loraSTF_max_v2_single_exp6_change_20260924_all_epoch1_openVIT_bs2/checkpoint-102689
+adapter_name_or_path: /home/maxlin/桌面/LlamaFactory/saves/qwen3-vl-2b/inno_report_loraSTF_max_v2_single_exp11_change_20260924_all_epoch1_rank128alpha256_rsLORA/checkpoint-102689
 template: qwen3_vl_nothink
 infer_backend: huggingface
 trust_remote_code: true
