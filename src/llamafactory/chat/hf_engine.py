@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import inspect
 import os
 from collections.abc import AsyncGenerator, Callable
 from threading import Thread
@@ -182,6 +183,27 @@ class HuggingfaceEngine(BaseEngine):
             gen_kwargs["_seed"] = seed
 
         mm_inputs = template.mm_plugin.get_mm_inputs(**mm_input_dict, batch_ids=[prompt_ids], processor=processor)
+        if (
+            getattr(model.config, "model_type", None) == "qwen3_vl"
+            and "mm_token_type_ids" not in mm_inputs
+            and (mm_inputs.get("image_grid_thw") is not None or mm_inputs.get("video_grid_thw") is not None)
+        ):
+            rope_model = model.get_base_model() if hasattr(model, "get_base_model") else model
+            get_rope_func = getattr(rope_model, "get_rope_index", None)
+            if get_rope_func is None:
+                get_rope_func = getattr(getattr(rope_model, "model", None), "get_rope_index", None)
+            # New Transformers requires modality ids for Qwen3-VL generation M-RoPE.
+            # Match the training collator, while leaving older model APIs unchanged.
+            if callable(get_rope_func) and "mm_token_type_ids" in inspect.signature(get_rope_func).parameters:
+                mm_token_type_ids = torch.zeros_like(inputs)
+                image_token_id = getattr(model.config, "image_token_id", None)
+                video_token_id = getattr(model.config, "video_token_id", None)
+                if image_token_id is not None:
+                    mm_token_type_ids[inputs == image_token_id] = 1
+                if video_token_id is not None:
+                    mm_token_type_ids[inputs == video_token_id] = 2
+                mm_inputs["mm_token_type_ids"] = mm_token_type_ids
+
         for key, value in mm_inputs.items():
             if isinstance(value, list) and isinstance(value[0], torch.Tensor):  # for pixtral inputs
                 value = torch.stack(value)  # assume they have same sizes

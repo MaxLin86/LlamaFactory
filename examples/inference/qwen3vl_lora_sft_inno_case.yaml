@@ -1,0 +1,17 @@
+### 病例多图评测（在 llama_factory 环境中运行）
+### CUDA_VISIBLE_DEVICES=0 python data/inno_report_data/eval_case_images.py train
+### CUDA_VISIBLE_DEVICES=0 python data/inno_report_data/eval_case_images.py validation
+### CUDA_VISIBLE_DEVICES=0 python data/inno_report_data/eval_case_images.py eagle
+
+model_name_or_path: /media/maxlin/SATA/modelscope/Qwen3-VL-2B-Instruct
+adapter_name_or_path: /home/maxlin/桌面/LlamaFactory/saves/qwen3-vl-2b/inno_report_lora_sft_case_v1_nothink_exp1_epoch1_min256_max512_cut5120_bs1
+template: qwen3_vl_nothink
+infer_backend: huggingface
+infer_dtype: bfloat16
+flash_attn: fa2
+trust_remote_code: true
+do_sample: false
+temperature: 0.0
+max_new_tokens: 1024  # 普通报告版；若之后测试think模型，需要另行提高此上限并更换template。
+image_max_pixels: 262144
+image_min_pixels: 65536
