@@ -522,9 +522,9 @@ class CaseViewer:
 # 默认路径和选项集中在parser附近；修改模型只需修改独立的推理YAML。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "examples/inference/qwen3vl_lora_sft_inno_case.yaml"
-DEFAULT_DATASET_ROOT = Path("/media/maxlin/SATA/ReportData/Max_V1_case_dataV1")
+DEFAULT_DATASET_ROOT = Path("/media/maxlin/SATA/ReportData/Max_V1_case_dataV2")
 DEFAULT_TOKENIZED_ROOT = Path(
-    "/media/maxlin/SATA/ReportData/tokenized/max_case_v1_qwen3vl2b_nothink_min256_max512_cut5120_val10pct_seed2026"
+    "/media/maxlin/SATA/ReportData/tokenized/max_case_v2_qwen3vl2b_nothink_min256_max512_cut5120_val10pct_seed2026"
 )
 DEFAULT_EAGLE_ROOT = Path("/home/maxlin/桌面/innoaitools/inference/report/selector_results")
 DEFAULT_SEED = 2026

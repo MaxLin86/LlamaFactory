@@ -12,6 +12,9 @@ Usage (all paths below have defaults)::
     # Inspect the first valid conversation in the terminal, confirm, then generate all cases.
     python data/inno_report_data/data_generate_case_images.py
 
+    # Include predicted position/lesion hints, keeping the original output filenames.
+    python data/inno_report_data/data_generate_case_images.py --with-image-hints
+
 The original images and reports are READ ONLY. A persistent isolated Python
 worker calls the existing report_images_selector.py API; its ONNX/TRT models
 are loaded once per examination type. Training images use the exact crop boxes
@@ -19,7 +22,7 @@ used during selection, never the selector's unprocessed export copies.
 
 Output layout::
 
-    Max_V1_case_dataV1/
+    Max_V1_case_dataV2/
         all_conversations.json          # Images -> structured report.
         all_conversations_think.json    # Images -> <think>...</think> + report.
         dataset_info.json               # max_v1_case / max_v1_case_think
@@ -49,6 +52,16 @@ conversations are printed in the terminal. Enter y/yes to process all remaining
 cases without further prompts. Refusal, EOF, Ctrl+C or a noninteractive terminal
 stops generation, preserving the first case and intermediate records but not
 publishing final conversation files. No preview images or files are generated.
+
+--with-image-hints adds predicted position/lesion hints to the human input of
+both exports. Filenames, JSON structure and dataset registrations remain
+all_conversations.json / all_conversations_think.json and max_v1_case /
+max_v1_case_think. Use separate output directories to distinguish versions.
+Each image's hints come only from auxiliary model outputs, never reports, filenames or category
+directories. Unaccepted positions are unknown; no detection does NOT mean no
+disease. Hinted models should receive the same hints at inference, including
+real deployment, not just validation. Use a separate tokenized_path when
+training on the hinted exports; existing tokenized datasets are not updated.
 """
 
 from __future__ import annotations
@@ -516,13 +529,82 @@ def output_file(root: Path, relative: str) -> Path:
     return candidate
 
 
-def build_sample(record: dict[str, Any], *, include_thinking: bool = False) -> Optional[dict[str, Any]]:
+def image_hint(prediction: dict[str, Any], scope: str) -> dict[str, Any]:
+    """Extract model predictions only; missing inference is never a negative."""
+    accepted_field, position_field = {
+        "gs": ("gqc36_accepted", "part"),
+        "cs": ("QC01_accepted", "cecum_class"),
+    }[scope]
+    accepted = prediction.get(accepted_field)
+    lesion_detected = prediction.get("lesion_detected")
+    if not isinstance(accepted, bool) or not isinstance(lesion_detected, bool):
+        raise ValueError("选图记录缺少部位/病变模型结果，不能从来源、文件名或报告猜测图片提示")
+    position = prediction.get(position_field) if accepted else None
+    if position is not None:
+        if not isinstance(position, str) or not position.strip():
+            raise ValueError("选图记录的预测部位必须是非空字符串或null")
+        position = position.strip()
+    return {"position": position, "lesion_detected": lesion_detected}
+
+
+def image_hints_from_selection(record: dict[str, Any], selection: dict[str, Any]) -> list[dict[str, Any]]:
+    """Match selected predictions by source path, preserving exported image order."""
+    selected = selection["selected"]
+    by_source = {str(Path(item["path"]).resolve()): item for item in selected}
+    if len(by_source) != len(selected):
+        raise ValueError("选图记录中原图路径重复：" + record["case_key"])
+    images, image_info = record["images"], record["image_info"]
+    if len(images) != len(image_info) or len(images) != len(selected):
+        raise ValueError("图片与选图记录的数量不匹配：" + record["case_key"])
+    hints = []
+    seen = set()
+    for image, info in zip(images, image_info):
+        source = str(Path(info["source"]).resolve())
+        if Path(image).name != info["file_name"] or source not in by_source or source in seen:
+            raise ValueError("无法将图片与选图预测结果一一对应：" + record["case_key"])
+        seen.add(source)
+        hints.append(image_hint(by_source[source], record["scope"]))
+    return hints
+
+
+def load_image_hints(record: dict[str, Any], output: Path) -> list[dict[str, Any]]:
+    """Read new cached hints or recover old-cache hints from selection.json."""
+    hints = record.get("image_hints")
+    if hints is None:
+        selection = read_json(output_file(output, record["selection_file"]))
+        hints = image_hints_from_selection(record, selection)
+    return hints
+
+
+def build_case_prompt(scope: str, image_count: int, image_hints: Optional[list[dict[str, Any]]] = None) -> str:
+    """Shared prompt layout; passing no hints preserves the original input exactly."""
+    exam = {"gs": "胃镜", "cs": "肠镜"}[scope]
+    prompt = f"请综合该病例的{exam}图像，描述镜检所见，并给出诊断结论。"
+    if image_hints is None:
+        return prompt + "\n<image>" * image_count
+    if len(image_hints) != image_count:
+        raise ValueError("逐图提示的数量与图片数量不一致")
+    prompt += "\n以下信息为辅助模型预测，可能存在误差。"
+    for number, hint in enumerate(image_hints, 1):
+        position, detected = hint["position"], hint["lesion_detected"]
+        if position is not None and (
+            not isinstance(position, str) or not position.strip() or "<image>" in position or "\n" in position
+        ):
+            raise ValueError("逐图提示包含非法部位文字")
+        if not isinstance(detected, bool):
+            raise ValueError("逐图病变提示必须是明确的模型检测结果，不能缺省为阴性")
+        lesion = "；检出疑似病变" if detected else ""
+        prompt += f"\n\n图{number}：预测部位：{position or '未确定'}{lesion}。\n<image>"
+    return prompt
+
+
+def build_sample(
+    record: dict[str, Any], *, include_thinking: bool = False, include_image_hints: bool = False
+) -> Optional[dict[str, Any]]:
     images = record["images"]
     if not images:
         raise ValueError("病例没有选中图片：" + record["case_key"])
-    exam = {"gs": "胃镜", "cs": "肠镜"}[record["scope"]]
-    prompt = f"请综合该病例的{exam}图像，描述镜检所见，并给出诊断结论。"
-    prompt += "\n<image>" * len(images)
+    prompt = build_case_prompt(record["scope"], len(images), record["image_hints"] if include_image_hints else None)
     answer = json.dumps(record["gt"], ensure_ascii=False, indent=2, allow_nan=False)
     if include_thinking:
         block = thinking_block(record.get("think", ""))
@@ -585,6 +667,7 @@ def prepare_case(case: Case, output: Path, worker: SelectorWorker) -> dict[str, 
         "selection_counts": response["result"]["counts"],
         "coverage": response["result"].get("coverage"),
     }
+    record["image_hints"] = image_hints_from_selection(record, response["result"])
     build_sample(record)
     return record
 
@@ -623,16 +706,20 @@ def cache_records(path: Path) -> Iterator[dict[str, Any]]:
                 raise ValueError(f"病例缓存第{number}行损坏：{exc}") from exc
 
 
-def confirm_first_sample(record: dict[str, Any]) -> bool:
+def confirm_first_sample(record: dict[str, Any], *, include_image_hints: bool = False) -> bool:
     """Show actual conversations once, requiring approval before the next case."""
-    normal = build_sample(record)
-    thought = None if record.get("think_error") else build_sample(record, include_thinking=True)
     sections = [
         "首个有效样本：" + record["case_key"],
         "images:\n" + json.dumps(record["images"], ensure_ascii=False, indent=2),
     ]
-    for name, sample in (("普通版", normal), ("think版", thought)):
-        sections.append(f"========== {name} conversations ==========")
+    hint_label = "有提示" if include_image_hints else "无提示"
+    for name, thinking in (("普通版", False), ("think版", True)):
+        sample = (
+            None
+            if thinking and record.get("think_error")
+            else build_sample(record, include_thinking=thinking, include_image_hints=include_image_hints)
+        )
+        sections.append(f"========== {name}（{hint_label}） conversations ==========")
         if sample is None:
             sections.append("本病例没有可用的think，仅纳入普通版。")
             continue
@@ -644,7 +731,7 @@ def confirm_first_sample(record: dict[str, Any]) -> bool:
     return confirm_in_terminal("确认首个样本的对话内容正确，并继续生成全部剩余病例？[y/N]: ")
 
 
-def write_conversations(output: Path) -> dict[str, Any]:
+def write_conversations(output: Path, *, include_image_hints: bool = False) -> dict[str, Any]:
     normal_path = output / "all_conversations.json"
     think_path = output / "all_conversations_think.json"
     counts = Counter({"cases": 0, "images": 0, "thinking_cases": 0, "excluded_report_keyword": 0})
@@ -665,10 +752,16 @@ def write_conversations(output: Path) -> dict[str, Any]:
             for image in record["images"]:
                 if not output_file(output, image).is_file():
                     raise FileNotFoundError("缓存引用的训练图片不存在：" + image)
-            write_sample(normal_stream, build_sample(record), counts["cases"])
+            if include_image_hints:
+                record["image_hints"] = load_image_hints(record, output)
+            write_sample(normal_stream, build_sample(record, include_image_hints=include_image_hints), counts["cases"])
             counts["cases"] += 1
             counts["images"] += len(record["images"])
-            thought_sample = None if record.get("think_error") else build_sample(record, include_thinking=True)
+            thought_sample = (
+                None
+                if record.get("think_error")
+                else build_sample(record, include_thinking=True, include_image_hints=include_image_hints)
+            )
             if thought_sample:
                 write_sample(think_stream, thought_sample, counts["thinking_cases"])
                 counts["thinking_cases"] += 1
@@ -692,6 +785,7 @@ def write_conversations(output: Path) -> dict[str, Any]:
         "thinking_conversations": think_path.name,
         "excluded_report_keywords": list(EXCLUDED_REPORT_KEYWORDS),
         "excluded_report_cases": excluded_reports,
+        "with_image_hints": include_image_hints,
     }
     LOGGER.info(
         "对话已保存：%s",
@@ -716,6 +810,7 @@ def run_generation(args: argparse.Namespace, output: Path, cases: Sequence[Case]
         "selector_sha256": hashlib.sha256(args.selector.read_bytes()).hexdigest(),
         "max_images": {"gs": args.max_images_gs, "cs": args.max_images_cs},
         "workers": args.workers,
+        "with_image_hints": args.with_image_hints,
         "first_sample_confirmed": False,
         "excluded_report_keywords": list(EXCLUDED_REPORT_KEYWORDS),
     }
@@ -759,14 +854,14 @@ def run_generation(args: argparse.Namespace, output: Path, cases: Sequence[Case]
                 )
                 if counts["prepared"] == 1:
                     progress.clear()
-                    if not confirm_first_sample(record):
+                    if not confirm_first_sample(record, include_image_hints=args.with_image_hints):
                         manifest["status"] = "cancelled_by_user"
                         LOGGER.info("未确认首个样本，已停止；保留首例及中间记录，不生成最终对话文件。")
                         return 0
                     manifest["first_sample_confirmed"] = True
                     LOGGER.info("首个样本已确认，连续生成剩余全部病例，不再逐例询问。")
                     progress.refresh()
-        summary = write_conversations(output)
+        summary = write_conversations(output, include_image_hints=args.with_image_hints)
         manifest.update(summary)
         manifest["status"] = "completed_with_skips" if counts["skipped"] else "completed"
         return 0
@@ -784,12 +879,13 @@ def run_generation(args: argparse.Namespace, output: Path, cases: Sequence[Case]
 # 常用配置集中放在 parser 前；直接运行或 VS Code 调试均使用这些默认值。
 DEFAULT_GS_ROOT = Path("/media/maxlin/SATA/ReportData/D4/胃镜_拆分")
 DEFAULT_CS_ROOT = Path("/media/maxlin/SATA/ReportData/D4/肠镜_拆分")
-DEFAULT_OUTPUT_ROOT = Path("/media/maxlin/SATA/ReportData/Max_V1_case_dataV1")
+DEFAULT_OUTPUT_ROOT = Path("/media/maxlin/SATA/ReportData/Max_V1_case_dataV2")
 DEFAULT_SELECTOR = Path("/home/maxlin/桌面/innoaitools/inference/report/report_images_selector.py")
 DEFAULT_SELECTOR_PYTHON = Path("/home/maxlin/anaconda3/bin/python")
 DEFAULT_MAX_IMAGES_GS = 15
 DEFAULT_MAX_IMAGES_CS = 12
 DEFAULT_WORKERS = 2
+DEFAULT_WITH_IMAGE_HINTS = False  # True时普通/think版均带逐图提示；文件名和数据集注册名不变。
 EXCLUDED_REPORT_KEYWORDS = ("超声",)  # reports目录任意JSON/TXT命中即整例排除，含think。
 CACHE_NAME = "prepared_cases.jsonl"
 SCHEMA_VERSION = 1
@@ -804,6 +900,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gs-root", type=Path, default=DEFAULT_GS_ROOT, help="胃镜病例根目录")
     parser.add_argument("--cs-root", type=Path, default=DEFAULT_CS_ROOT, help="肠镜病例根目录")
     parser.add_argument("--scope", choices=("all", "gs", "cs"), default="all", help="生成的病例类型")
+    parser.add_argument(
+        "--with-image-hints",
+        action="store_true",
+        default=DEFAULT_WITH_IMAGE_HINTS,
+        help="在普通/think版输入中加入逐图预测部位+疑似病变提示；文件名不变，用输出目录区分；训练须换tokenized_path",
+    )
     parser.add_argument("--max-images-gs", type=int, default=DEFAULT_MAX_IMAGES_GS, help="每例胃镜图片上限，至少12")
     parser.add_argument("--max-images-cs", type=int, default=DEFAULT_MAX_IMAGES_CS, help="每例肠镜图片上限，至少10")
     parser.add_argument(

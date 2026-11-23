@@ -22,21 +22,21 @@ disable_gradient_checkpointing: false  # 保持梯度检查点以节省显存
 
 ### dataset：一条样本对应一个病例，包含多张图片
 dataset: max_v1_case                # all_conversations.json；本配置暂不训练think版
-dataset_dir: /media/maxlin/SATA/ReportData/Max_V1_case_dataV1
+dataset_dir: /media/maxlin/SATA/ReportData/Max_V1_case_dataV2
 template: qwen3_vl_nothink
 cutoff_len: 5120                    # 包含全部图片Token、问题及报告；2048不足以覆盖多数多图病例。think版本则7168
 preprocessing_num_workers: 2
 preprocessing_batch_size: 16        # 多图病例不沿用单图的2000，避免预处理内存峰值过高
 dataloader_num_workers: 4
 dataloader_persistent_workers: true
-tokenized_path: /media/maxlin/SATA/ReportData/tokenized/max_case_v1_qwen3vl2b_nothink_min256_max512_cut5120_val10pct_seed2026
+tokenized_path: /media/maxlin/SATA/ReportData/tokenized/max_case_v2_qwen3vl2b_nothink_min256_max512_cut5120_val10pct_seed2026
 overwrite_cache: false
 # 若病例数据、图片处理参数或template/cutoff_len改变，必须改用新的tokenized_path。
 # 首次训练自动预处理并保存缓存；已有tokenized_path时直接加载，不会自动检查数据是否变化。
 # max_samples: 32                  # 可先小批量测试；测试时同时换一个独立的tokenized_path和output_dir
 
 ### output：独立于单图实验，保留优化器状态以便中断后恢复
-output_dir: saves/qwen3-vl-2b/inno_report_lora_sft_case_v1_nothink_exp2_epoch5_min256_max512_cut5120_bs1
+output_dir: saves/qwen3-vl-2b/inno_report_lora_sft_case_v2_nothink_exp1_epoch5_min256_max512_cut5120_bs1
 logging_steps: 10
 save_strategy: steps
 save_steps: 100
