@@ -21,7 +21,8 @@
 数据路径、鹰眼病例清单等默认值集中在文件末尾的build_parser上方。
 validation不是独立test：这些病例训练期间已用于计算eval_loss。
 鹰眼只读取selected.txt登记的选中图片，绝不读取all/或montage.jpg作为输入。
-同一病例的全部图片一次传入；GT、think、文件名和选图标签不传给模型。
+train/validation直接读取all_conversations.json中的原始提问，完整保留逐图提示。
+同一病例的全部图片一次传入；参考GT、think和文件名不传给模型。
 后台连续推理，左侧图片、右侧上方模型回答和下方GT；点击缩略图可放大。
 关闭窗口会终止本脚本创建的模型子进程，释放其显存。
 """
@@ -37,6 +38,7 @@ import sys
 import time
 import traceback
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,15 +50,20 @@ class EvalCase:
     scope: str
     images: tuple[str, ...]
     gt: str | None = None
+    source_prompt: str | None = None
 
     @property
     def question(self) -> str:
+        if self.source_prompt is not None:
+            return self.source_prompt.partition("\n")[0]
         exam = {"gs": "胃镜", "cs": "肠镜"}[self.scope]
-        return f"请综合该病例的{exam}图像，描述镜检所见，并给出诊断结论。"
+        return f"请综合该病例的{exam}图像，给出诊断结论。"
 
     @property
     def prompt(self) -> str:
-        # 与data_generate_case_images.build_sample完全相同的图文顺序。
+        if self.source_prompt is not None:
+            return self.source_prompt
+        # 鹰眼没有对应的训练样本，沿用独立提问；缓存病例不走此分支。
         return self.question + "\n<image>" * len(self.images)
 
 
@@ -79,11 +86,56 @@ def image_paths(values: list[str], root: Path) -> tuple[str, ...]:
     return paths
 
 
+def iter_conversation_samples(path: Path) -> Iterator[dict[str, Any]]:
+    """Stream a JSON array, retaining one sample and a small read buffer."""
+    decoder = json.JSONDecoder()
+    buffer = ""
+    with path.open(encoding="utf-8-sig") as stream:
+
+        def skip_whitespace() -> None:
+            nonlocal buffer
+            buffer = buffer.lstrip()
+            while not buffer:
+                chunk = stream.read(65536)
+                if not chunk:
+                    raise ValueError(f"对话JSON意外结束：{path}")
+                buffer = chunk.lstrip()
+
+        skip_whitespace()
+        if not buffer.startswith("["):
+            raise ValueError(f"对话JSON顶层必须是数组：{path}")
+        buffer = buffer[1:]
+        skip_whitespace()
+        if buffer.startswith("]"):
+            return
+        while True:
+            try:
+                sample, end = decoder.raw_decode(buffer)
+            except json.JSONDecodeError as error:
+                chunk = stream.read(65536)
+                if not chunk:
+                    raise ValueError(f"对话JSON损坏或不完整：{path}") from error
+                buffer += chunk
+                continue
+            if not isinstance(sample, dict):
+                raise ValueError(f"对话JSON中的样本必须是对象：{path}")
+            buffer = buffer[end:]
+            yield sample
+            skip_whitespace()
+            separator, buffer = buffer[0], buffer[1:]
+            if separator == "]":
+                return
+            if separator != ",":
+                raise ValueError(f"对话JSON缺少样本分隔符：{path}")
+            skip_whitespace()
+
+
 def load_cached_cases(dataset_root: Path, tokenized_root: Path, seed: int, split: str) -> list[EvalCase]:
     from datasets import load_from_disk
 
     if split not in ("train", "validation"):
         raise ValueError(f"不支持的缓存划分：{split}")
+    dataset_root = dataset_root.resolve()
     label = "训练集" if split == "train" else "验证集"
     # memory-map，只取10条记录的images列；不读取全部Token或重建随机划分。
     dataset = load_from_disk(str(tokenized_root / split), keep_in_memory=False)
@@ -95,31 +147,50 @@ def load_cached_cases(dataset_root: Path, tokenized_root: Path, seed: int, split
     targets = set(wanted)
     if len(targets) != len(wanted):
         raise ValueError(f"抽到的{label}记录存在重复病例，请核对缓存。")
-    requested_keys = {Path(paths[0]).parent.parent.relative_to(dataset_root.resolve()).as_posix() for paths in wanted}
+    requested_keys = {Path(paths[0]).parent.parent.relative_to(dataset_root).as_posix() for paths in wanted}
 
     found: dict[tuple[str, ...], EvalCase] = {}
-    # 逐行读取中间记录，仅保留抽中的病例；不加载整份conversations.json。
-    with (dataset_root / "prepared_cases.jsonl").open(encoding="utf-8") as stream:
-        for line in stream:
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            if record["case_key"] not in requested_keys:
-                continue
-            paths = tuple(str((dataset_root / value).resolve()) for value in record["images"])
-            if paths not in targets:
-                continue
-            if paths in found:
-                raise ValueError(f"中间记录中出现重复病例：{record['case_key']}")
-            found[paths] = EvalCase(
-                record["case_key"],
-                record["scope"],
-                paths,
-                json.dumps(record["gt"], ensure_ascii=False, indent=2),
-            )
+    source_file = dataset_root / "all_conversations.json"
+    # 缓存只确定划分和病例身份；提问及GT均从实际训练JSON原样读取，不重新拼接。
+    for sample in iter_conversation_samples(source_file):
+        values = sample.get("images")
+        if not isinstance(values, list) or not values:
+            raise ValueError(f"训练样本缺少图片：{source_file}")
+        first_image = Path(values[0])
+        if first_image.is_absolute():
+            first_image = first_image.relative_to(dataset_root)
+        case_key = first_image.parent.parent.as_posix()
+        if case_key not in requested_keys:
+            continue
+        paths = image_paths(values, dataset_root)
+        if paths not in targets:
+            raise ValueError(f"训练JSON与缓存的图片或顺序不一致：{case_key}")
+        if paths in found:
+            raise ValueError(f"训练JSON中出现重复病例：{case_key}")
+        conversations = sample.get("conversations")
+        if (
+            not isinstance(conversations, list)
+            or len(conversations) != 2
+            or not all(isinstance(item, dict) for item in conversations)
+            or conversations[0].get("from") != "human"
+            or conversations[1].get("from") != "gpt"
+        ):
+            raise ValueError(f"病例样本应包含一轮human/gpt对话，不能隐式省略其他消息：{case_key}")
+        prompt, gt = (item.get("value") for item in conversations)
+        if not isinstance(prompt, str) or not prompt.strip() or not isinstance(gt, str) or not gt.strip():
+            raise ValueError(f"病例的原始提问或GT为空：{case_key}")
+        if prompt.count("<image>") != len(paths):
+            raise ValueError(f"原始提问中的<image>数量与图片数量不一致：{case_key}")
+        scope = case_key.split("/", 1)[0]
+        if scope not in ("gs", "cs"):
+            raise ValueError(f"未知的检查类型：{case_key}")
+        found[paths] = EvalCase(case_key, scope, paths, gt, source_prompt=prompt)
     if targets - found.keys():
-        raise ValueError(f"{label}缓存与prepared_cases.jsonl不匹配，不能确认病例身份和GT；请核对默认数据路径。")
+        raise ValueError(
+            f"{label}缓存与all_conversations.json不匹配，不能确认病例身份及原始提问；请核对默认数据路径。"
+        )
     print(f"{label}共{len(dataset)}例；seed={seed}；抽取行号（从0开始）：{indices}")
+    print(f"已从 {source_file} 原样读取提问（含已有逐图提示）和参考GT。")
     return [found[paths] for paths in wanted]
 
 
@@ -522,9 +593,9 @@ class CaseViewer:
 # 默认路径和选项集中在parser附近；修改模型只需修改独立的推理YAML。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "examples/inference/qwen3vl_lora_sft_inno_case.yaml"
-DEFAULT_DATASET_ROOT = Path("/media/maxlin/SATA/ReportData/Max_V1_case_dataV2")
+DEFAULT_DATASET_ROOT = Path("/media/maxlin/SATA/ReportData/Max_V1_case_dataV2_diagonly")
 DEFAULT_TOKENIZED_ROOT = Path(
-    "/media/maxlin/SATA/ReportData/tokenized/max_case_v2_qwen3vl2b_nothink_min256_max512_cut5120_val10pct_seed2026"
+    "/media/maxlin/SATA/ReportData/tokenized/max_case_v2_diagonly_qwen3vl2b_nothink_min256_max512_cut5120_val10pct_seed2026"
 )
 DEFAULT_EAGLE_ROOT = Path("/home/maxlin/桌面/innoaitools/inference/report/selector_results")
 DEFAULT_SEED = 2026

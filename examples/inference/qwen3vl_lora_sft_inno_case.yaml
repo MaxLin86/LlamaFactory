@@ -4,7 +4,7 @@
 ### CUDA_VISIBLE_DEVICES=0 python data/inno_report_data/eval_case_images.py eagle
 
 model_name_or_path: /media/maxlin/SATA/modelscope/Qwen3-VL-2B-Instruct
-adapter_name_or_path: /home/maxlin/桌面/LlamaFactory/saves/qwen3-vl-2b/inno_report_lora_sft_case_v2_nothink_exp1_epoch5_min256_max512_cut5120_bs1
+adapter_name_or_path: /home/maxlin/桌面/LlamaFactory/saves/qwen3-vl-2b/inno_report_lora_sft_case_v2_diagonly_nothink_exp1_epoch5_min256_max512_cut5120_bs1_lora16
 template: qwen3_vl_nothink
 infer_backend: huggingface
 infer_dtype: bfloat16

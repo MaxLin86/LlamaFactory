@@ -1,0 +1,69 @@
+### 仅诊断结论对照实验：沿用V2完整报告exp1（rank16）参数，从同一基座新建LoRA
+### CUDA_VISIBLE_DEVICES=0 llamafactory-cli train examples/train_lora/qwen3vl_lora_sft_inno_diagonly.yaml
+
+### model
+model_name_or_path: /media/maxlin/SATA/modelscope/Qwen3-VL-2B-Instruct
+image_max_pixels: 262144   # 单张图片的面积上限，约512×512；不是整个病例的总上限
+image_min_pixels: 65536    # 单张图片的面积下限，约256×256
+trust_remote_code: true
+# 新病例实验从基座创建LoRA，不继承单图实验的adapter或resume_from_checkpoint。
+
+### method：与V2完整报告exp1（rank16）实验一致，不以未验证的rank64组作基线
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target: all
+freeze_vision_tower: false           # 允许视觉塔中的目标线性层训练LoRA，并非全参数训练视觉塔
+freeze_multi_modal_projector: true
+disable_gradient_checkpointing: false  # 保持梯度检查点以节省显存
+
+### dataset：保留V2逐图提示和图片，只学习诊断结论，不训练think
+dataset: max_v1_case_diagnosis_only  # all_conversations.json；回答只有诊断结论
+dataset_dir: /media/maxlin/SATA/ReportData/Max_V1_case_dataV2_diagonly
+template: qwen3_vl_nothink
+cutoff_len: 5120                    # 本次全量实测最长4393 token；仍包含全部图片Token，不能降到2048
+preprocessing_num_workers: 2
+preprocessing_batch_size: 16        # 多图病例不沿用单图的2000，避免预处理内存峰值过高
+dataloader_num_workers: 4
+dataloader_persistent_workers: true
+tokenized_path: /media/maxlin/SATA/ReportData/tokenized/max_case_v2_diagonly_qwen3vl2b_nothink_min256_max512_cut5120_val10pct_seed2026
+overwrite_cache: false
+# 若病例数据、图片处理参数或template/cutoff_len改变，必须改用新的tokenized_path。
+# 首次训练自动预处理并保存缓存；已有tokenized_path时直接加载，不会自动检查数据是否变化。
+# max_samples: 32                  # 可先小批量测试；测试时同时换一个独立的tokenized_path和output_dir
+
+### output：独立于完整报告实验，保留优化器状态以便中断后恢复
+output_dir: saves/qwen3-vl-2b/inno_report_lora_sft_case_v2_diagonly_nothink_exp1_epoch5_min256_max512_cut5120_bs1_lora16
+logging_steps: 10
+save_strategy: steps
+save_steps: 100
+save_total_limit: 5
+plot_loss: true
+overwrite_output_dir: false         # 非空目录按框架规则检查/恢复；新实验请换output_dir
+save_only_model: false
+report_to: none
+
+### train：单卡3090 24GB的起步配置，实际峰值仍取决于每例图片数量/尺寸和序列长度
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8       # 单卡有效batch保持为8个病例
+learning_rate: 1.0e-4
+num_train_epochs: 5.0
+lr_scheduler_type: cosine
+warmup_steps: 10                    # 病例仅几千条，不再使用单图实验的1000步warmup
+seed: 2026
+
+load_best_model_at_end: false
+metric_for_best_model: eval_loss
+greater_is_better: false
+bf16: true
+ddp_timeout: 180000000
+flash_attn: fa2
+
+### eval：按病例样本划分，不能沿用单图数据的val_size=50000
+val_size: 0.1
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 100

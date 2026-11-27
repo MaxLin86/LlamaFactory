@@ -12,8 +12,8 @@ trust_remote_code: true
 stage: sft
 do_train: true
 finetuning_type: lora
-lora_rank: 16
-lora_alpha: 32
+lora_rank: 64
+lora_alpha: 128
 lora_dropout: 0.05
 lora_target: all
 freeze_vision_tower: false           # 允许视觉塔中的目标线性层训练LoRA，并非全参数训练视觉塔
@@ -36,7 +36,7 @@ overwrite_cache: false
 # max_samples: 32                  # 可先小批量测试；测试时同时换一个独立的tokenized_path和output_dir
 
 ### output：独立于单图实验，保留优化器状态以便中断后恢复
-output_dir: saves/qwen3-vl-2b/inno_report_lora_sft_case_v2_nothink_exp1_epoch5_min256_max512_cut5120_bs1
+output_dir: saves/qwen3-vl-2b/inno_report_lora_sft_case_v2_nothink_exp2_epoch5_min256_max512_cut5120_bs1_lora64
 logging_steps: 10
 save_strategy: steps
 save_steps: 100
